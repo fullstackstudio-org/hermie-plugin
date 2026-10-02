@@ -130,18 +130,36 @@ def full_payload(note):
     return note.payload(preview=False, gateway_key="bf796761db84e312", session_kind="canonical")
 
 
-# A clarify question's request id is minted inside the gateway's blocking
-# prompt and is never visible to a hook (see `events.from_clarify`), so that one
-# notification cannot carry the `requestId` the contract asks of every
-# `request`. The app opens the chat and finds the open question itself.
-KNOWN_GAPS = {"clarify": ("requestId",)}
-
-
 @pytest.mark.parametrize("name", sorted(every_notification()))
 def test_every_payload_conforms(name):
     note = every_notification()[name]
     data = full_payload(note)
-    assert conformance_problems(data, allow_missing=KNOWN_GAPS.get(name, ())) == []
+    assert conformance_problems(data) == []
+
+
+def test_a_clarify_question_carries_no_request_id_because_none_is_known():
+    """Its id is minted inside the gateway's blocking prompt, out of a hook's sight."""
+    assert "requestId" not in full_payload(every_notification()["clarify"])
+
+
+def test_an_approval_without_a_session_drops_the_session_and_keeps_the_rest():
+    note = events.from_approval(
+        bot="scout", session_key="", description="rm", request_id="r1", turn_id="t1", at=10
+    )
+    data = full_payload(note)
+    assert "sessionId" not in data
+    assert data["requestId"] == "r1"
+    assert data["method"] == "approval"
+    assert conformance_problems(data) == []
+    assert expo_message(note)["categoryId"] == "hermie.request"
+
+
+def test_an_approval_without_a_request_id_breaks_the_contract():
+    """The rule the checker enforces, so a sender that loses the id is caught."""
+    note = events.from_approval(
+        bot="scout", session_key="s1", description="rm", request_id=None, turn_id="t1", at=10
+    )
+    assert conformance_problems(full_payload(note)) == ["requestId is required"]
 
 
 def test_the_type_list_is_the_contracts():
@@ -199,8 +217,8 @@ def test_every_android_channel_is_the_type_name():
 # -- Web Push ----------------------------------------------------------------
 
 
-def test_web_push_carries_the_payload_where_the_service_worker_reads_it(tmp_path, monkeypatch):
-    """`{title, body, data}` — the shape the app's service worker opens."""
+def web_push_payload(tmp_path, monkeypatch, note):
+    """Deliver *note* to one browser subscription and hand back what was encrypted."""
     pytest.importorskip("cryptography")
     import yaml
 
@@ -214,7 +232,7 @@ def test_web_push_carries_the_payload_where_the_service_worker_reads_it(tmp_path
     row = {
         "v": 1, "transport": "webpush", "endpoint": "https://push.example/x",
         "keys": {"p256dh": "a", "auth": "b"}, "platform": "web",
-        "types": {"request": True}, "updatedAt": 1,
+        "types": {name: True for name in events.TYPES}, "updatedAt": 1,
     }
     (home / "profile.yaml").write_text(
         yaml.safe_dump({"ui_meta": {"hermie-app": {"push": {"registrations": {"w1": row}}}}})
@@ -229,13 +247,144 @@ def test_web_push_carries_the_payload_where_the_service_worker_reads_it(tmp_path
         lambda key, endpoint, p256dh, auth, payload, contact="": sent.append(payload)
         or push_pkg.webpush.Result(status=201),
     )
-    assert module.deliver(every_notification()["approval"]) == 1
+    assert module.deliver(note) == 1
+    return sent[0]
 
-    assert set(sent[0]) == {"title", "body", "data"}
-    assert sent[0]["title"] == "scout"
-    assert sent[0]["data"]["type"] == "request"
-    assert sent[0]["data"]["requestId"] == "r1"
-    assert conformance_problems(sent[0]["data"]) == []
+
+def test_web_push_carries_the_payload_where_the_service_worker_reads_it(tmp_path, monkeypatch):
+    """`{title, body, data}` — the shape the app's service worker opens."""
+    sent = web_push_payload(tmp_path, monkeypatch, every_notification()["approval"])
+
+    assert set(sent) == {"title", "body", "data"}
+    assert sent["title"] == "scout"
+    assert sent["data"]["type"] == "request"
+    assert sent["data"]["requestId"] == "r1"
+    assert conformance_problems(sent["data"]) == []
+
+
+# The app's service worker, `public/hermie-push-sw.js` in the Hermie app's
+# repository (unchanged since the 0.1.9 release), ported line for line: what
+# its `push` handler shows, and what its `notificationclick` handler hands the
+# app. The real file is also run under Node below when it can be found.
+
+
+def service_worker_shows(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    title = payload["title"] if isinstance(payload.get("title"), str) and payload["title"] else "Hermie"
+    body = payload["body"] if isinstance(payload.get("body"), str) else ""
+    data = payload["data"] if isinstance(payload.get("data"), dict) else {}
+    needs_input = data.get("type") == "request"
+    bot = data["bot"] if isinstance(data.get("bot"), str) and data["bot"] else ""
+    if not bot:
+        tag = "hermie"
+    else:
+        session = next(
+            (data[key] for key in ("sessionId", "session") if isinstance(data.get(key), str) and data[key]), ""
+        )
+        tag = f"hermie:{bot}:{session}" if session else f"hermie:{bot}"
+    return {
+        "title": title,
+        "options": {
+            "body": body,
+            "data": data,
+            "tag": tag,
+            "requireInteraction": needs_input,
+            "actions": [{"action": "allow", "title": "Allow"}, {"action": "deny", "title": "Deny"}]
+            if needs_input
+            else [],
+        },
+    }
+
+
+def service_worker_tap(shown, action):
+    return {"actionIdentifier": action or "default", "data": shown["options"]["data"]}
+
+
+def test_the_service_worker_turns_an_approval_into_a_notification_with_buttons(tmp_path, monkeypatch):
+    sent = web_push_payload(tmp_path, monkeypatch, every_notification()["approval"])
+    shown = service_worker_shows(sent)
+
+    assert shown["title"] == "scout"
+    assert shown["options"]["body"] == "Needs your approval"
+    assert shown["options"]["tag"] == "hermie:scout:s1"
+    assert shown["options"]["requireInteraction"] is True
+    assert [action["action"] for action in shown["options"]["actions"]] == ["allow", "deny"]
+
+    tap = service_worker_tap(shown, "allow")
+    assert tap["actionIdentifier"] == "allow"
+    # What the app's `pushTapOf` reads to answer: the bot and the request.
+    assert tap["data"]["bot"] == "scout"
+    assert tap["data"]["requestId"] == "r1"
+    assert tap["data"]["sessionId"] == "s1"
+
+
+def test_the_flat_payload_this_plugin_used_to_send_opened_nothing():
+    """Why the shape changed: the worker found no bot, no tag and no buttons."""
+    data = full_payload(every_notification()["approval"])
+    shown = service_worker_shows({**data, "title": "scout", "body": "Needs your approval"})
+    assert shown["options"]["tag"] == "hermie"
+    assert shown["options"]["actions"] == []
+    assert shown["options"]["data"] == {}
+
+
+def app_repo_service_worker():
+    contract_path = app_repo_contract()
+    if contract_path is None:
+        return None
+    root = contract_path.parents[2]
+    for relative in ("expo/hermie/public/hermie-push-sw.js", "apps/hermie/public/hermie-push-sw.js"):
+        if (root / relative).is_file():
+            return root / relative
+    return None
+
+
+NODE_HARNESS = r"""
+const fs = require('fs'), vm = require('vm')
+const [source, payloadJson, action] = process.argv.slice(1)
+const handlers = {}, shown = [], posted = [], waits = []
+const self = {
+  addEventListener: (type, handler) => { handlers[type] = handler },
+  skipWaiting () {},
+  clients: { claim () { return Promise.resolve() } },
+  registration: {
+    scope: 'https://app.example/',
+    showNotification: (title, options) => { shown.push({ title, options }); return Promise.resolve() }
+  }
+}
+const clients = {
+  matchAll: async () => [{ focus: () => Promise.resolve(), postMessage: message => posted.push(message) }],
+  openWindow: async () => {}
+}
+vm.runInNewContext(fs.readFileSync(source, 'utf8'), { self, clients, encodeURIComponent, JSON })
+;(async () => {
+  handlers.push({ data: { json: () => JSON.parse(payloadJson) }, waitUntil: p => waits.push(p) })
+  await Promise.all(waits)
+  handlers.notificationclick({
+    action, notification: { data: shown[0].options.data, close () {} }, waitUntil: p => waits.push(p)
+  })
+  await Promise.all(waits)
+  process.stdout.write(JSON.stringify({ shown: shown[0], posted: posted[0] }))
+})()
+"""
+
+
+def test_the_real_service_worker_agrees_with_the_port(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+
+    source = app_repo_service_worker()
+    node = shutil.which("node")
+    if source is None or node is None:
+        pytest.skip("needs the app repository checked out next to this one, and Node")
+    sent = web_push_payload(tmp_path, monkeypatch, every_notification()["approval"])
+    result = subprocess.run(
+        [node, "-e", NODE_HARNESS, str(source), json.dumps(sent), "allow"],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    real = json.loads(result.stdout)
+    port = service_worker_shows(sent)
+    assert real["shown"] == port
+    assert real["posted"] == {"source": "hermie-push", "response": service_worker_tap(port, "allow")}
 
 
 # -- the relay ---------------------------------------------------------------
@@ -261,7 +410,7 @@ def relay_entry(note):
 def test_every_relay_message_carries_a_conforming_data_bag_and_no_text(name):
     note = every_notification()[name]
     message = relay_entry(note)["message"]
-    assert conformance_problems(message["data"], allow_missing=KNOWN_GAPS.get(name, ())) == []
+    assert conformance_problems(message["data"]) == []
     assert "preview" not in message["data"]
     assert (message["title"], message["body"]) == (note.title, note.body)
 

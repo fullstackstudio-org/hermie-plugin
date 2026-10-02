@@ -43,7 +43,12 @@
         "required": true,
         "description": "One of `types`."
       },
-      { "key": "sessionId", "type": "string", "required": true, "description": "The canonical (stored) session id." },
+      {
+        "key": "sessionId",
+        "type": "string",
+        "required": false,
+        "description": "The canonical (stored) session id. Present whenever the event has a session."
+      },
       {
         "key": "session",
         "type": "string",
@@ -61,8 +66,8 @@
         "key": "requestId",
         "type": "string",
         "required": false,
-        "requiredWhen": { "type": "request" },
-        "description": "The server request the notification was raised for."
+        "requiredWhen": { "type": "request", "method": "approval" },
+        "description": "The server request the notification was raised for. Required on an approval; a clarify carries it only when the sender knows it."
       },
       {
         "key": "method",
