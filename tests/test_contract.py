@@ -60,3 +60,12 @@ def test_the_advert_says_which_shapes_this_gateway_understands():
     assert contract.CAP_UIMETA_PER_USER == "ui_meta.per_user"
     assert contract.CAP_PUSH_SEEN_PER_CHAT == "push.seen.per_chat"
     assert "push" in IMPLEMENTED
+
+
+def test_the_relay_origins_are_published_only_when_given():
+    assert "relayOrigins" not in contract.advert(modules={}, capabilities=[])
+    assert contract.advert(modules={}, capabilities=[], relay_origins=())["relayOrigins"] == []
+    published = contract.advert(modules={}, capabilities=[], relay_origins=("https://push.hermie.dev",))
+    assert published["relayOrigins"] == ["https://push.hermie.dev"]
+    # Additive: a reader of the shape this advert has always had is not disturbed.
+    assert contract.read_capabilities(published) == []

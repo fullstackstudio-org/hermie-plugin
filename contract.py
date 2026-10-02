@@ -116,7 +116,14 @@ CAP_PUSH_EXPO = "push.expo"
 # Rows with `transport: relay` are served: this gateway posts to a push relay on
 # its own allow-list, which is how a native Apple app is reached. An app that
 # does not see it keeps its Expo row, and keeps being reached through Expo.
+#
+# Claimed only while the allow-list holds RELAY_DEFAULT_ORIGIN, the relay the
+# Hermie apps register with. An app that switched to its relay row on seeing
+# the string, in front of a gateway that does not post to that relay, would go
+# silent — so until apps read `relayOrigins` (see `advert`) and check their own
+# relay against it, the string itself has to mean "your relay is served here".
 CAP_PUSH_RELAY = "push.relay"
+RELAY_DEFAULT_ORIGIN = "https://push.hermie.dev"
 CAP_PUSH_WEBPUSH = "push.webpush"
 CAP_PUSH_PREVIEW = "push.preview"
 CAP_PUSH_MUTE = "push.mute"
@@ -212,6 +219,7 @@ def advert(
     now: float | None = None,
     installed_ref: str = "",
     latest: str = "",
+    relay_origins: Iterable[str] | None = None,
 ) -> Dict[str, Any]:
     """The value written to the ``hermie-plugin`` ui_meta key.
 
@@ -220,11 +228,18 @@ def advert(
     the installed tree sits at, and comparing that against the newest release is
     something the app can do on its own network. `latest` is filled in only when
     the operator switched the gateway-side check on.
+
+    `relayOrigins` lists the push relays this gateway posts to, as https
+    origins, whenever the push module is on — an empty list included, which
+    says "no relay at all". It is additive and needs no `v` bump: an app reads
+    it to decide whether the relay IT registered with is served here before it
+    moves a device onto a relay row. An app that does not know the field goes
+    by `push.relay`, which is only claimed for the default relay.
     """
     source: Dict[str, Any] = {"repo": REPO, "ref": installed_ref}
     if latest:
         source["latest"] = latest
-    return {
+    value: Dict[str, Any] = {
         "v": CONTRACT_VERSION,
         "version": PLUGIN_VERSION,
         "maxContract": MAX_CONTRACT,
@@ -235,6 +250,9 @@ def advert(
         "limits": dict(limits or {}),
         "updatedAt": int(now if now is not None else time.time()),
     }
+    if relay_origins is not None:
+        value["relayOrigins"] = list(relay_origins)
+    return value
 
 
 def read_capabilities(value: Any) -> List[str]:

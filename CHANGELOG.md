@@ -27,6 +27,11 @@ people.
   address of their choosing. Requests go over https only, follow no redirect, use a proxy only when
   one is set in the environment, and time out after ten seconds. Neither the send secret nor a whole
   handle is ever logged.
+- **The advert says which relays this gateway posts to.** `relayOrigins` lists the allow-list,
+  so an app can check its own relay before it moves a device onto a relay row. `push.relay` itself
+  is claimed only while `https://push.hermie.dev` — the relay the Hermie apps register with — is on
+  the list: an app that switched on seeing it, in front of a gateway that posts elsewhere, would go
+  silent.
 - **No message text crosses the relay.** A relay row is sent the bot's name and the kind of event,
   whatever its own `preview` says, until notifications are encrypted end to end to a key only the
   device holds. A row may already carry that key (`enc`); it is read and kept, and does not change

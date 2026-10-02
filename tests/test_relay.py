@@ -343,6 +343,72 @@ def test_a_gateway_that_serves_no_relay_does_not_claim_one(tmp_path, monkeypatch
     assert contract.CAP_PUSH_RELAY not in module.capabilities()
 
 
+def test_a_gateway_that_does_not_post_to_the_apps_relay_does_not_claim_one(tmp_path, monkeypatch):
+    """An app seeing `push.relay` moves its device to the relay; here it would go silent."""
+    _, module = gateway(
+        tmp_path, monkeypatch, {}, settings={"push.relay_origins": ["https://relay.example.org"]}
+    )
+    assert module.relay_origins == ("https://relay.example.org",)
+    assert contract.CAP_PUSH_RELAY not in module.capabilities()
+
+
+def test_the_default_relay_beside_another_is_still_claimed(tmp_path, monkeypatch):
+    _, module = gateway(
+        tmp_path, monkeypatch, {},
+        settings={"push.relay_origins": ["https://relay.example.org", "https://push.hermie.dev"]},
+    )
+    assert contract.CAP_PUSH_RELAY in module.capabilities()
+
+
+def advert_for(tmp_path, monkeypatch, settings=None):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "profile.yaml").write_text(yaml.safe_dump({"ui_meta": {}}))
+    monkeypatch.setattr(uimeta, "hermes_home", lambda: home)
+
+    class Ctx:
+        profile_name = "scout"
+        state = None
+
+        def get_config(self, key, default=None):
+            return (settings or {}).get(key, default)
+
+        def register_hook(self, name, callback):
+            pass
+
+        def register_command(self, *args, **kwargs):
+            return object()
+
+        def on_unload(self, callback):
+            pass
+
+    hermie_plugin.register(Ctx())
+    return uimeta.read_key(uimeta.PLUGIN_KEY, home)
+
+
+def test_the_advert_says_which_relays_are_served(tmp_path, monkeypatch):
+    advert = advert_for(tmp_path, monkeypatch)
+    assert advert["relayOrigins"] == ["https://push.hermie.dev"]
+
+
+def test_the_advert_lists_an_operators_own_relay(tmp_path, monkeypatch):
+    advert = advert_for(
+        tmp_path, monkeypatch, {"push.relay_origins": ["https://relay.example.org/", "not an origin"]}
+    )
+    assert advert["relayOrigins"] == ["https://relay.example.org"]
+    assert contract.CAP_PUSH_RELAY not in contract.read_capabilities(advert)
+
+
+def test_an_empty_allow_list_is_published_as_empty(tmp_path, monkeypatch):
+    advert = advert_for(tmp_path, monkeypatch, {"push.relay_origins": []})
+    assert advert["relayOrigins"] == []
+
+
+def test_without_push_the_advert_names_no_relays(tmp_path, monkeypatch):
+    advert = advert_for(tmp_path, monkeypatch, {"modules.push": False})
+    assert "relayOrigins" not in advert
+
+
 def test_the_plugin_advert_carries_the_relay_capability(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     home.mkdir()

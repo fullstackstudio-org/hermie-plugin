@@ -153,10 +153,12 @@ class PushModule:
             found.append(contract.CAP_PUSH_SESSION_KIND)
         if webpush.available():
             found.append(contract.CAP_PUSH_WEBPUSH)
-        # The relay is claimed whenever there is a relay to post to. An operator
-        # who emptied the allow-list has said this gateway serves none, and a
-        # device that registered there anyway would hear nothing.
-        if self.relay_origins:
+        # The relay is claimed only while the relay the Hermie apps register
+        # with is on the allow-list. An app that sees the string moves its
+        # device onto a relay row, and in front of a gateway that does not post
+        # there it would go silent. Which relays ARE served is in the advert's
+        # `relayOrigins`, for an app that registered somewhere else.
+        if relay.DEFAULT_ORIGIN in self.relay_origins:
             found.append(contract.CAP_PUSH_RELAY)
         if self.gateway_preview == "device":
             found.append(contract.CAP_PUSH_PREVIEW)

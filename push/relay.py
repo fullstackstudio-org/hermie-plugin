@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 # The relay the Hermie apps register with. It is the whole default allow-list:
 # a gateway posts nowhere else unless its operator says so.
-DEFAULT_ORIGIN = "https://push.hermie.dev"
+DEFAULT_ORIGIN = contract.RELAY_DEFAULT_ORIGIN
 
 SEND_PATH = "/v1/send"
 REQUEST_VERSION = 1

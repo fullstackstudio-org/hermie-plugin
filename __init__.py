@@ -154,6 +154,7 @@ def publish(
     capabilities: List[str],
     installed_ref: str = "",
     latest: str = "",
+    relay_origins: Optional[List[str]] = None,
 ) -> Optional[int]:
     """Tell the app what this gateway can do.
 
@@ -171,6 +172,7 @@ def publish(
             limits={"payloadBytes": 3500, "contextChars": int(runtime.config("context.max_chars", 1200) or 1200)},
             installed_ref=installed_ref,
             latest=latest,
+            relay_origins=relay_origins,
         )
         uimeta.write_key(uimeta.PLUGIN_KEY, value, runtime.home)
         return int(value["updatedAt"])
@@ -194,10 +196,15 @@ def register(ctx: Any) -> None:
 
     capabilities.extend(profile_name_module.register(ctx, runtime).capabilities())
 
+    # Which push relays this gateway posts to, published beside the
+    # capabilities; absent when push is off. See `contract.advert`.
+    relay_origins: Optional[List[str]] = None
     if states.get("push") == "on":
         from . import push as push_module
 
-        capabilities.extend(push_module.register(ctx, runtime).capabilities())
+        push = push_module.register(ctx, runtime)
+        capabilities.extend(push.capabilities())
+        relay_origins = list(push.relay_origins)
 
     if states.get("context") == "on":
         from . import context as context_module
@@ -213,7 +220,7 @@ def register(ctx: Any) -> None:
     if latest:
         capabilities.append(contract.CAP_UPDATE_CHECK)
 
-    stamp = publish(runtime, states, capabilities, installed_ref, latest)
+    stamp = publish(runtime, states, capabilities, installed_ref, latest, relay_origins)
 
     # An advert that outlives the plugin is a lie the app would act on, so the
     # key is removed on unload. A gateway that is killed rather than unloaded
