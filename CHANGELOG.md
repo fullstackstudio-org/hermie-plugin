@@ -59,6 +59,9 @@ people.
 
 ### Fixed
 
+- **An unloaded plugin starts no second sender.** A notification offered after the push module was
+  stopped found no sender and started a new one while the old one could still be delivering. A
+  stopped module now takes no more work.
 - **A scheduled job's id is no longer shown on the lock screen.** It was appended to the body of
   every cron notification ("A scheduled job failed: <job>") on every transport. The push contract
   says `jobId` is carried, never shown: it still rides in the payload, and the body now names only

@@ -42,6 +42,10 @@ class PushModule:
         self.queue: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=QUEUE_SIZE)
         self.worker: Optional[threading.Thread] = None
         self.lock = threading.Lock()
+        # Set once by `stop()` and never cleared: an unloaded module takes no
+        # more work. Without it, an `offer()` after `stop()` saw no worker and
+        # started a second sender while the first was still delivering.
+        self._stopped = False
         self._vapid_key = None
         self._gateway_key: Optional[str] = None
         # What has already been reported as not served — a relay a row names, a
@@ -199,7 +203,7 @@ class PushModule:
 
     def offer(self, notification: Optional[events.Notification], *, delay: bool = False) -> None:
         """Hand one decision to the worker. Never raises, never blocks."""
-        if notification is None:
+        if notification is None or self._stopped:
             return
         try:
             due = time.time() + (self.delay_seconds if delay else 0)
@@ -211,6 +215,8 @@ class PushModule:
 
     def _ensure_worker(self) -> None:
         with self.lock:
+            if self._stopped:
+                return
             if self.worker is not None and self.worker.is_alive():
                 return
             self.worker = threading.Thread(target=self._run, name="hermie-push", daemon=True)
@@ -218,6 +224,7 @@ class PushModule:
 
     def stop(self) -> None:
         with self.lock:
+            self._stopped = True
             worker = self.worker
             self.worker = None
         if worker is not None and worker.is_alive():

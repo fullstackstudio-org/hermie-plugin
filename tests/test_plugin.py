@@ -484,6 +484,48 @@ def test_a_full_queue_drops_rather_than_slowing_the_turn(tmp_path, monkeypatch):
 
 
 
+def test_an_offer_after_stop_starts_no_second_sender(tmp_path, monkeypatch):
+    """The old sender may still be delivering; a second one would race it."""
+    import threading
+
+    home, ctx = gateway(tmp_path, app_meta=app_meta_with())
+    monkeypatch.setattr(uimeta, "hermes_home", lambda: home)
+
+    import hermie_plugin.push as push_pkg
+
+    module = push_pkg.PushModule(hermie_plugin.Runtime(ctx, home=home))
+    started = threading.Event()
+    release = threading.Event()
+    delivered = []
+
+    def slow_deliver(note):
+        delivered.append(note)
+        started.set()
+        release.wait(5)
+        return 0
+
+    monkeypatch.setattr(module, "deliver", slow_deliver)
+    note = events.from_approval(bot="b", session_key="s", description="d", request_id="r", turn_id="t", at=10)
+    module.offer(note)
+    assert started.wait(5), "the sender never picked the first notification up"
+    first = module.worker
+
+    def senders():
+        return {thread for thread in threading.enumerate() if thread.name == "hermie-push"}
+
+    before = senders()
+    module.stop()
+    module.offer(note)
+
+    assert senders() - before == set(), "a second sender was started"
+    assert first.is_alive()
+    release.set()
+    first.join(5)
+    assert not first.is_alive()
+    assert len(delivered) == 1
+    assert module.worker is None
+
+
 def test_a_probe_unload_leaves_the_serving_advert_alone(tmp_path, monkeypatch):
     """`hermes plugins doctor` registers against a probe context and unloads it
     again. That unload must not erase the advert of the gateway that is
