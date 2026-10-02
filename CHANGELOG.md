@@ -37,6 +37,14 @@ people.
   device holds. A row may already carry that key (`enc`); it is read and kept, and does not change
   this yet.
 
+### Changed
+
+- **A notification is titled with the bot's display name.** Where the profile has a `display_name`
+  (the label `PATCH /api/plugins/hermie/profiles/{name}` sets), every transport shows it as the
+  title instead of the profile name. `data.bot` is still the profile name, which is what a tap is
+  resolved against. A label that is empty, longer than 60 characters or has control characters in
+  it is ignored.
+
 ### Fixed
 
 - **A scheduled job's id is no longer shown on the lock screen.** It was appended to the body of

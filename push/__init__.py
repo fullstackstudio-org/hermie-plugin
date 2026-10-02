@@ -243,6 +243,12 @@ class PushModule:
     def section(self) -> Section:
         return read_sections(self.runtime.app_sections())
 
+    def display_name(self) -> str:
+        try:
+            return self.runtime.bot_display_name()
+        except Exception:
+            return ""
+
     def session_kind(self, notification: events.Notification) -> str:
         """`canonical`, `branch`, `other`, or ``""`` when this gateway cannot say.
 
@@ -283,6 +289,10 @@ class PushModule:
         session_kind = self.session_kind(notification)
         fallback_key = self.fallback_gateway_key()
         relay_origins = self.relay_origins
+        # The lock screen shows the bot under the name a person gave it, where
+        # there is one; `data.bot` stays the profile name, which is what the
+        # app resolves a tap against. Read once per notification.
+        display_name = self.display_name()
 
         expo_batch: List[Dict[str, Any]] = []
         expo_owners: List[str] = []
@@ -297,6 +307,7 @@ class PushModule:
             # because this is the last decision before the wire.
             preview = preview and registration.may_preview
             title, body = notification.rendered(preview=preview)
+            title = display_name or title
             key = gateway_key.key_for(registration.gateway_key, fallback_key)
             payload = notification.payload(preview=preview, gateway_key=key, session_kind=session_kind)
             if registration.transport == "relay":

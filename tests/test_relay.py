@@ -1001,3 +1001,44 @@ def test_reports_about_rows_are_capped(tmp_path, monkeypatch, caplog):
     assert len(reports) == push_pkg.MAX_REPORTS
     # Row-supplied text is quoted in the log, never written out raw.
     assert "'https://r0.example'" in reports[0].getMessage()
+
+
+# -- the name on the lock screen ---------------------------------------------
+
+
+def with_display_name(home, value):
+    path = home / "profile.yaml"
+    document = yaml.safe_load(path.read_text())
+    document["display_name"] = value
+    path.write_text(yaml.safe_dump(document))
+
+
+def test_every_transport_shows_the_bots_display_name(tmp_path, monkeypatch):
+    home, module = gateway(tmp_path, monkeypatch, {"i1": relay_row(), "i2": expo_row()})
+    with_display_name(home, "  Scout the Researcher ")
+    fake = FakeRelay()
+    wired(monkeypatch, fake)
+    expo_sent = []
+    monkeypatch.setattr(
+        push_pkg.expo, "send",
+        lambda batch: expo_sent.extend(batch) or [push_pkg.expo.Ticket(token=m["to"], status="ok") for m in batch],
+    )
+
+    assert module.deliver(approval()) == 2
+    relay_message = fake.requests[0][1]["messages"][0]["message"]
+    assert relay_message["title"] == "Scout the Researcher"
+    assert expo_sent[0]["title"] == "Scout the Researcher"
+    # A tap is resolved against the profile name, which does not change.
+    assert relay_message["data"]["bot"] == "scout"
+    assert expo_sent[0]["data"]["bot"] == "scout"
+    assert relay_message["thread"].endswith(":scout")
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", 42, ["x"], "x" * 61, "two\nlines", "bell\x07"])
+def test_a_label_unfit_to_show_falls_back_to_the_profile_name(tmp_path, monkeypatch, value):
+    home, module = gateway(tmp_path, monkeypatch, {"i1": relay_row()})
+    with_display_name(home, value)
+    fake = FakeRelay()
+    wired(monkeypatch, fake)
+    assert module.deliver(approval()) == 1
+    assert fake.requests[0][1]["messages"][0]["message"]["title"] == "scout"

@@ -125,6 +125,18 @@ def profile_stamp(home: Optional[Path] = None) -> Tuple[int, int]:
     return (int(getattr(info, "st_mtime_ns", 0)), int(info.st_size))
 
 
+def read_display_name(home: Optional[Path] = None) -> Any:
+    """The profile's own ``display_name``, as the file holds it, or ``None``.
+
+    Read raw: deciding whether it is fit to show is the caller's business, and
+    the one caller (`Runtime.bot_display_name`) cleans it.
+    """
+    try:
+        return _load_yaml(profile_path(home)).get("display_name")
+    except Exception:
+        return None
+
+
 def read_meta(home: Optional[Path] = None) -> Dict[str, Any]:
     """The whole ``ui_meta`` map, or ``{}`` when the profile cannot be read."""
     try:
