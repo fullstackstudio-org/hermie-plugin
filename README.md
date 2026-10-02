@@ -5,9 +5,24 @@ plugin and does two things today: it sends **push notifications** to the devices
 that registered themselves, and it puts a little **context about the person and
 their device** into a bot's system prompt. `/me` says who it thinks you are.
 
-It has no inbound port, no relay, no account, and no credential of its own. The
-devices that want notifications write themselves into the gateway's own profile
-metadata; the plugin reads that from the inside.
+It has no inbound port, no account, and no credential of its own. The devices
+that want notifications write themselves into the gateway's own profile
+metadata; the plugin reads that from the inside and reaches each device the way
+it registered: through Expo's push service for the Expo app, through the
+browser's own push service for Web Push, and through the Hermie push relay for
+the native app on iPhone, iPad and Mac.
+
+That relay is the one service in the chain the Hermie project runs. Only an
+app's publisher can talk to Apple's push service for that app, so notifications
+for the native app pass through a relay we operate, where before they passed
+through Expo's. It needs no account. It stores a device address and counters,
+never a notification. It sees the bot's name and display name, the kind of
+event, a cron job's name, and the ids the payload carries (session, request,
+event, gateway key), as well as the sending gateway's IP address and the timing
+of each notification; message text never crosses it in the clear — today it
+does not cross it at all, and once notifications are encrypted end to end it
+will cross only as ciphertext the device alone can open. A gateway posts only to the relays on its own
+allow-list, which by default is that one.
 
 ```
 hermes plugins install fullstackstudio-org/hermie-plugin --enable
@@ -33,7 +48,9 @@ That is the whole install. Hermes clones the repo into
 By default a notification says **who and what kind** — a bot's name and an event
 type — and nothing about what was said. That is a deliberate default: a
 notification is rendered on a lock screen by Apple, Google or a browser vendor.
-Turn previews on per device in the app when you want the text.
+Turn previews on per device in the app when you want the text. A device reached
+through the relay gets the bot and the kind of event either way, until
+notifications are encrypted end to end.
 
 Tapping Allow does not approve anything by itself. The app opens, connects to
 the gateway, re-reads the open requests, and answers only if that request is
@@ -49,13 +66,14 @@ empty, so a reader checks for absence.
 |---|---|---|
 | `v` | yes | the payload shape, `1` |
 | `type` | yes | `message`, `request`, `cron`, `cron_done`, `cron_failed`, `turn_done`, `turn_failed` |
-| `bot` | yes | the bot's name, which is its profile name |
+| `bot` | yes | the bot's name, which is its profile name; the notification's visible title is the profile's display name where it has one |
 | `at` | yes | unix seconds |
 | `eventId` | yes | the dedupe id, so two hooks describing one fact buzz once |
 | `sessionId` | where known | the session the turn happened in |
 | `sessionKind` | where readable | `canonical`, `branch` or `other` — which conversation to open |
 | `gatewayKey` | where known | which gateway sent it, for a device set up against several |
 | `requestId` | approvals | re-validated against the gateway before anything is answered |
+| `method` | requests | `approval` or `clarify`; only an approval is posted under the `hermie.request` category, which carries Allow and Deny |
 | `cron`, `cronCertain` | cron runs | that this was a scheduled run, and whether that is a fact or a guess |
 | `jobId` | where known | the name you gave the job |
 | `preview` | opt-in | the text, only where the device asked **and** the gateway allows it |
@@ -86,6 +104,7 @@ that cannot work is worse than one that is absent.
 | Capability | Means |
 |---|---|
 | `push.expo` | Expo notifications can be sent |
+| `push.relay` | a `transport: relay` row is delivered, and `https://push.hermie.dev` — the relay the Hermie apps use — is on this gateway's allow-list; `relayOrigins` in the advert lists every relay it posts to |
 | `push.webpush` | Web Push can be signed here |
 | `push.preview` | a device may ask for message text in its payload |
 | `push.mute` | a mute written by the app will be obeyed |
@@ -169,6 +188,11 @@ plugins:
           # started writing the key itself, and only when the gateway is
           # reached somewhere other than `dashboard.public_url`.
           public_url: ""
+
+          # The push relays this gateway may post to, as https origins. A
+          # device registered with any other relay is not sent to. Setting
+          # this replaces the default; an empty list serves no relay at all.
+          relay_origins: ["https://push.hermie.dev"]
 
           # Web Push only. The key is created on first use if this is empty.
           vapid_key_path: ""
@@ -382,7 +406,8 @@ notification says which kind of answer it got, so the app can tell a fact from a
 guess.
 
 A notification carries the **job id** when the signal had one, which is the name
-you gave the job.
+you gave the job. It travels in the payload for the app and is never shown on
+the lock screen.
 
 > **`cron_failed` means the run's turn failed, not that the job did.** The
 > scheduler decides a job's real outcome after the agent has gone — an

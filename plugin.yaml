@@ -10,8 +10,9 @@ description: >-
   Hermie's gateway-side companion: push notifications for bot messages, approval
   and clarify requests, and cron deliveries, plus a `/me` command that says who
   the gateway thinks it is talking to and how it worked that out. Registrations
-  and settings live in the gateway's own profile ui_meta; nothing is sent to a
-  third-party relay.
+  and settings live in the gateway's own profile ui_meta. Notifications go out
+  through Expo, Web Push, or the Hermie push relay for the native Apple apps,
+  and message text never crosses the relay in the clear.
 author: FullStack Studio
 license: MIT
 homepage: https://github.com/fullstackstudio-org/hermie-plugin

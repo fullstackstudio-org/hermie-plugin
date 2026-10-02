@@ -155,8 +155,8 @@ def update_fields(runtime: Runtime) -> Tuple[str, str]:
     machine and it is what lets an app work out whether an update exists without
     the gateway reaching anywhere. The newest release is asked for only when the
     operator said so, because an unprompted outbound request from somebody's
-    gateway is a surprise on a product that advertises having no relay and no
-    account. See `update.py`.
+    gateway is a surprise on a product that promises no account and no call
+    nobody asked for. See `update.py`.
     """
     try:
         ref = update.installed_ref(Path(__file__).resolve().parent)

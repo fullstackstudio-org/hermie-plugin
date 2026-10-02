@@ -154,6 +154,7 @@ hermie-plugin:
                  push.type.turn_failed, push.webpush, ui_meta.per_user]
   modules: {push: "on", context: "on", presence: planned, ...}
   limits: {payloadBytes: 3500, contextChars: 1200}
+  relayOrigins: ["https://push.hermie.dev"]   # push on only; may be []
   updatedAt: 1790001453
 ```
 
@@ -286,8 +287,9 @@ installed tree is a checkout. Loose refs, packed refs and the detached HEAD that
 **Asking the repository what the newest release is, is off by default.** The
 advert already carries the version and the commit, so an app can work out that
 an update exists on its own network, and a gateway that makes an unprompted
-outbound request is a surprise on a product whose pitch is that it has no relay,
-no account and no credential. `update.check: true` switches it on: one GET of a
+outbound request is a surprise on a product whose pitch is that it needs no
+account and no credential, and calls out only to deliver what somebody asked to
+be told. `update.check: true` switches it on: one GET of a
 public URL, at most once an hour (cached in the state file, so hourly means
 hourly across restarts), nothing identifying sent, and every failure — including
 no outbound route at all — is cached as "no newer release" rather than retried
@@ -508,7 +510,16 @@ way `push.mute` says a mute will be obeyed.
 Bot name and event type. Nothing else, unless the device turned `preview` on
 **and** the gateway allows it — the gateway setting is a ceiling, never a floor.
 `preview: never` overrides a device that asked; `preview: device` never turns one
-on. Payloads are kept under ~3.5 KB because APNs caps around 4 KB.
+on. Above both sits the transport: a device reached through the relay gets the
+bot and the kind of event whatever its row says, because message text crosses a
+relay only encrypted end to end, and that step has not shipped. Payloads are
+kept under ~3.5 KB because APNs caps around 4 KB.
+
+Every field, the category and the Android channels follow one contract file in
+the app's repository, `contract/push/contract.json`, which every sender and
+every app generation conform to; `tests/fixtures/push_contract.json` is this
+repo's copy, and `tests/test_push_contract.py` checks every transport's payload
+against it.
 
 | Field | When | What |
 |---|---|---|
@@ -516,9 +527,17 @@ on. Payloads are kept under ~3.5 KB because APNs caps around 4 KB.
 | `sessionId` | where known | the session the turn happened in |
 | `sessionKind` | where readable | `canonical` \| `branch` \| `other` |
 | `gatewayKey` | where known | which gateway sent it |
-| `requestId` | approvals | the request to re-read |
+| `requestId` | approvals; a clarify only when known, which today is never | the request to re-read |
+| `method` | requests | `approval` or `clarify` |
 | `cron`, `cronCertain`, `jobId` | cron runs | that it was scheduled, how sure, and which job |
 | `preview` | opt-in | the text |
+
+An approval that names its request is posted under the category
+`hermie.request`, which the app registers with its Allow and Deny actions. A
+clarify question gets no category, because no button can answer it, and nor
+does anything else. The Android channel is the type name. Both used to be the
+bare type, and since no app ever registered a category called `request`,
+approvals arrived without their buttons.
 
 An approval payload carries `requestId`. That is a hint, not an instruction:
 tapping Allow opens the app, which connects to the gateway, re-reads the open
@@ -627,7 +646,73 @@ cheaper than that mistake.
   against `cryptography`, which the Hermes runtime already ships. `pywebpush`
   would pull `py_vapid` and `http_ece` for roughly two hundred lines of
   arithmetic. The VAPID key is minted on first use, written `0600`, and never
-  rotated automatically. 404 and 410 retire the subscription.
+  rotated automatically. 404 and 410 retire the subscription. The encrypted
+  body is `{title, body, data}`, which is what the app's service worker reads.
+- **Relay** — for the native app on iPhone, iPad and Mac, which Expo no longer
+  reaches. Only an app's publisher can talk to Apple's push service for that
+  app, so the device registers with a relay the Hermie project operates and
+  writes `relay`, `handle` and `secret` into its row: the secret lets its holder
+  notify that one device and nothing else, which is the trust an Expo token
+  carried, and only the device can retarget or revoke the handle. The plugin
+  posts `{v: 1, messages: [...]}` to `<relay>/v1/send`, each message a title,
+  a body, the category, a thread (`<gatewayKey>:<bot>`), a collapse id (the
+  event id), a priority, a TTL and the contract's data bag; the relay builds
+  the platform payload itself, and an empty optional member is left out.
+
+  **A request stays inside the relay's limits**, because a request the relay
+  refuses has answered for nobody: at most twenty messages, at most 7,680
+  bytes encoded — a conservative limit of the plugin's own, which fits under
+  every request cap the relay has had; twenty real approvals come to about
+  12 KB — and never one handle twice, since answers are matched by handle. A handle
+  or secret that is not what the relay issues — base64url, 1 to 200
+  characters — drops that row on the way in, and a request refused as a whole
+  with 400 or 413 is sent again one message at a time, so one bad row costs
+  only itself; when every message is refused on its own as well, no row was
+  to blame and the relay is left alone for a minute. `tests/test_relay.py`
+  pins these numbers to the relay's.
+
+  `gone` retires the row the way `DeviceNotRegistered` does; `rejected` is
+  logged and dropped. `retry` and `limited`, and a request that got no answer
+  at all, are tried once more after the wait the relay asked for — unless it
+  asked for more than 30 seconds, which the sender thread does not wait. A
+  relay that failed a request twice is then left alone for the time it named
+  (a minute when it named none, an hour at most), and a handle over its limit
+  until its limit lapses (a day at most): every notification in that window is
+  dropped without a request. The thread waits at most once per relay per
+  notification.
+
+  The relay answers `gone` for an unknown handle and a wrong secret alike, and
+  counts those answers against the gateway that asked. So one person's rows
+  cannot spend that allowance for everybody: after three `gone` answers in an
+  hour for one person's rows, their rows that have never been delivered to are
+  not sent until the hour has passed, and a handle and secret that came back
+  `gone` are not sent again, even when a row is written again with them.
+
+  **The plugin posts only to origins on its own allow-list**, never to whatever
+  a row names. `push.relay_origins` defaults to exactly
+  `https://push.hermie.dev`; setting it replaces the default, for somebody who
+  runs their own relay. A row is input: posting where it points would let
+  anybody who can write a row aim the gateway at an address of their choosing,
+  with a body the gateway composed. So a row naming another origin is reported
+  once and skipped, a request goes over https and follows no redirect, a proxy
+  is used only when one is set in the process environment, and neither the
+  secret nor a whole handle is ever logged. Reports about rows are capped,
+  so a row rewritten on every turn cannot grow the log.
+
+  The advert's `relayOrigins` lists the allow-list, so an app can check the
+  relay it registered with before it moves a device onto a relay row.
+  `push.relay` is claimed only while `https://push.hermie.dev`, the relay the
+  Hermie apps register with, is on the list: an app that switched on seeing
+  the string, in front of a gateway that posts elsewhere, would go silent. An
+  app that does not see it keeps its Expo row.
+
+The title on every transport is the bot's `display_name` from its own
+`profile.yaml` where it has a usable one (a string, at most 60 characters, no
+control, invisible formatting or line-separator characters), and the profile
+name otherwise. `data.bot` is always the
+profile name, which is what a tap is resolved against. The body names the kind
+of event and nothing else — a cron job's id rides in `jobId` and is never
+shown, which is the contract's rule for it.
 
 **Retirement is recorded in the plugin's own state, never by editing the app's
 registration.** That entry lives under the app's `ui_meta` key and a write there
@@ -1390,6 +1475,7 @@ plugins:
           attached_window_seconds: 90
           delay_seconds: 5
           public_url: ""           # default: Hermes' own dashboard.public_url
+          relay_origins: ["https://push.hermie.dev"]   # replaces, never extends
           vapid_key_path: ""       # default: the plugin's own data dir
           vapid_contact: "mailto:you@example.com"
         context:
@@ -1583,18 +1669,26 @@ inside that profile and the lock it takes is that profile's `MEMORY.md.lock`.
 
 ## 7. Threat model
 
-Unchanged from ADR-0017, with three differences, all of them reductions.
+ADR-0017's, with four differences. Three are reductions. The fourth is the
+relay, which changes where a notification for the native Apple apps passes
+through, and is stated in full below.
 
 **Covered.**
 
 - *Nothing on the network can make a device buzz.* There is still no inbound
   endpoint. The plugin adds no listener, and the dashboard route it could have
   used is deliberately not used.
-- *A stolen Expo token cannot read anything.* It is a send address.
+- *A stolen Expo token or relay secret cannot read anything.* Either one is a
+  way to notify one device and nothing more, and only the device can retarget
+  or revoke its relay handle.
 - *A spoofed push cannot act.* Every action is re-validated against the
   gateway's own open requests before a response is sent.
 - *Content stays on the gateway by default.* With `preview` off, the transports
-  carry a bot name and a type.
+  carry a bot name and a type. Through the relay that is true whatever a device
+  asked for: message text never crosses it in the clear.
+- *A registration cannot aim the gateway anywhere.* The plugin posts only to
+  relay origins on its own allow-list, over https, without following a
+  redirect. A row naming any other address is not sent to.
 
 **Accepted.**
 
@@ -1604,6 +1698,23 @@ Unchanged from ADR-0017, with three differences, all of them reductions.
   here there is no such credential at all.
 - *Traffic analysis.* Apple, Google and any browser push service learn that a
   device received a notification, when, and from which server.
+- *The relay is a service we run.* Notifications for iPhone, iPad and Mac pass
+  through a relay the Hermie project operates, because only an app's publisher
+  can talk to Apple's push service; before this they passed through Expo's. It
+  needs no account. It stores a device address and counters, never a
+  notification. It sees the bot's name and display name, the kind of event, a
+  cron job's name, and the ids the payload carries (session, request, event,
+  gateway key), as well as the sending gateway's IP address and the timing;
+  message text only ever travels through it end-to-end encrypted, and until
+  that ships, not at all. If it is down, those notifications stop. If it
+  swallows requests without answering, it can also hold up the gateway's
+  queued Expo and Web Push notifications, by up to about 22 seconds a minute
+  (a timeout, a short wait and a second timeout, after which it is left alone
+  for a minute).
+- *Whoever can read a row can notify that device.* A relay row's secret, like an
+  Expo token, lets its holder make that one device buzz with a notification of
+  their composing — and every person on a shared gateway can read every row
+  (see below). It cannot be used to read anything or to retarget the device.
 - *The memory browser trusts the dashboard's own auth.* Any signed-in caller can
   read and edit any profile's memory. That is inherited, not invented: Hermes
   gives a route no identity to check and core's own routes already work this

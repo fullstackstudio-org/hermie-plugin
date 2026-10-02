@@ -20,6 +20,13 @@ written `0600` in its own data directory. It is used to sign Web Push requests
 and nothing else. It holds no gateway credential, because in-process it needs
 none — which is one fewer secret on disk than the external daemon it replaces.
 
+It also reads, out of the rows the app wrote, one relay send secret per native
+device. That secret is the device's, not the plugin's: it lets whoever holds it
+notify that one device and do nothing else, the device can revoke it, and it is
+the same trust an Expo token carries. The plugin sends it to the relay it came
+from and never writes it to a log; a log line names a handle by its first few
+characters only.
+
 ## What it exposes
 
 No listener of its own. For push, the only way into the notification path is a
@@ -44,12 +51,25 @@ operator of these routes exactly as they already are of core's. See **Known and
 accepted** below for what that means for each route, and what a switch below
 does and does not limit.
 
-Outbound, push talks to two kinds of address, both of them the device's own:
+Outbound, push talks to three kinds of address:
 
 - `exp.host`, to send an Expo push. No secret is involved; the token is the
   address.
 - whatever push endpoint a browser's `PushSubscription` named, over TLS, with an
   encrypted payload only that subscription can open.
+- a push relay on the gateway's own allow-list — `push.relay_origins`, by
+  default only `https://push.hermie.dev` — for the native Apple apps. Never an
+  address a registration names on its own: a row naming any other relay is not
+  sent to, because a row is input and posting wherever it points would let
+  anybody who can write one aim the gateway at an address of their choosing.
+  The request goes over https, follows no redirect, uses a proxy only when one
+  is set in the process environment, and carries the device's handle and send
+  secret, the bot's name and display name, the kind of event, a cron job's
+  name, and the ids the payload carries (session, request, event, gateway key)
+  — never message text. The relay also sees the sending gateway's IP address
+  and the timing of each request. The relay is the one service in this chain
+  the Hermie project runs; it needs no account and stores a device address and
+  counters, never a notification.
 
 With `update.check: true` (off by default), one more outbound call: a GET of
 this repository's public releases URL, at most once an hour, with nothing
