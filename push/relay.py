@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.request
@@ -83,6 +84,7 @@ MAX_MESSAGE_BYTES = 3_500
 
 # The relay's collapse id is at most 64 bytes, and its thread 256 characters.
 MAX_COLLAPSE_ID_BYTES = 64
+COLLAPSE_ID = re.compile(r"[\x21-\x7e]{1,%d}" % MAX_COLLAPSE_ID_BYTES)
 MAX_THREAD_CHARS = 256
 
 # How long the relay should keep trying a device that is offline.
@@ -110,6 +112,15 @@ BACKOFF_SECONDS = 60
 # The most handles `Pacing` remembers a limit for. A limit is a few seconds to a
 # day; past this many, the soonest to lapse are forgotten first.
 MAX_PACED_HANDLES = 1024
+
+# The longest a relay, or one handle on it, is left alone, whatever it asked
+# for. A `Retry-After` is the relay's word and the relay is trusted for
+# pacing, but not for silence: an hour for a whole relay and a day for one
+# handle (the relay's own daily limit) are the most any answer can buy, so a
+# mistaken or hostile `Retry-After: 1000000000` costs an hour, not every
+# notification until the gateway restarts.
+MAX_ORIGIN_HOLD_SECONDS = 3_600
+MAX_HANDLE_HOLD_SECONDS = 86_400
 
 SENT = "sent"
 GONE = "gone"
@@ -184,7 +195,12 @@ def message_for(
     """
     data = {key: value for key, value in payload.items() if key != "preview"}
     bot = str(data.get("bot") or "")
-    collapse = str(data.get("eventId") or "").encode("utf-8")[:MAX_COLLAPSE_ID_BYTES].decode("utf-8", "ignore")
+    # The relay takes 1 to 64 printable ASCII characters and refuses the whole
+    # message otherwise; an event id is `kind:` and hex, so it always fits, and
+    # anything that does not is left out rather than costing the notification.
+    collapse = str(data.get("eventId") or "")[:MAX_COLLAPSE_ID_BYTES]
+    if not COLLAPSE_ID.fullmatch(collapse):
+        collapse = ""
     # Notifications from one chat on one gateway stack together, and the same
     # bot name on two gateways does not.
     thread = (f"{gateway_key}:{bot}" if gateway_key else bot)[:MAX_THREAD_CHARS]
@@ -255,9 +271,14 @@ def _proxies() -> Dict[str, str]:
     return {"https": proxy} if proxy else {}
 
 
+def _seconds(value: int) -> int:
+    """A `Retry-After` as a number this side can hold: 0 to a day."""
+    return min(max(0, value), MAX_HANDLE_HOLD_SECONDS)
+
+
 def _retry_after(headers: Any) -> int:
     try:
-        return max(0, int(str(headers.get("Retry-After") or "0").strip()))
+        return _seconds(int(str(headers.get("Retry-After") or "0").strip()))
     except Exception:
         return 0
 
@@ -308,7 +329,9 @@ def _outcome_of(row: Any) -> Outcome:
     return Outcome(
         status=str(status),
         reason=str(reason)[:120] if isinstance(reason, str) else "",
-        retry_after=retry_after if isinstance(retry_after, int) and not isinstance(retry_after, bool) and retry_after > 0 else 0,
+        retry_after=_seconds(retry_after)
+        if isinstance(retry_after, int) and not isinstance(retry_after, bool)
+        else 0,
     )
 
 
@@ -433,15 +456,32 @@ class Pacing:
     def origin_wait(self, origin: str, now: float) -> float:
         return max(0.0, self.origins.get(origin, 0.0) - now)
 
-    def hold_origin(self, origin: str, until: float) -> None:
-        self.origins[origin] = max(self.origins.get(origin, 0.0), until)
+    def hold_origin(self, origin: str, seconds: float, now: float) -> None:
+        """Leave *origin* alone for *seconds*, at most an hour."""
+        seconds = min(max(0.0, seconds), MAX_ORIGIN_HOLD_SECONDS)
+        until = now + seconds
+        if until <= self.origins.get(origin, 0.0):
+            return
+        self.origins[origin] = until
+        if seconds > BACKOFF_SECONDS:
+            # Said once per hold, never per notification it then drops.
+            logger.warning("hermie: relay %s is left alone for %ds, as it asked", origin, int(seconds))
 
     def handle_wait(self, origin: str, handle: str, now: float) -> float:
         return max(0.0, self.handles.get((origin, handle), 0.0) - now)
 
-    def hold_handle(self, origin: str, handle: str, until: float, now: float) -> None:
+    def hold_handle(self, origin: str, handle: str, seconds: float, now: float) -> None:
+        """Leave one handle on *origin* alone for *seconds*, at most a day."""
+        seconds = min(max(0.0, seconds), MAX_HANDLE_HOLD_SECONDS)
         key = (origin, handle)
-        self.handles[key] = max(self.handles.get(key, 0.0), until)
+        until = now + seconds
+        if until <= self.handles.get(key, 0.0):
+            return
+        self.handles[key] = until
+        if seconds > BACKOFF_SECONDS:
+            logger.warning(
+                "hermie: relay %s limited %s; leaving it alone for %ds", origin, handle_hint(handle), int(seconds)
+            )
         if len(self.handles) > MAX_PACED_HANDLES:
             for stale in [k for k, at in self.handles.items() if at <= now]:
                 del self.handles[stale]
@@ -474,20 +514,30 @@ def _round(
             # One entry can sink a request (a field the relay will not read, a
             # body over its cap). Each is asked about on its own, once, so the
             # one that did it is the only one that pays.
+            refused_alone = 0
             for index in request:
                 single = _ask(origin, [entries[index]], post)
                 outcomes[index] = single.outcomes[0]
+                if single.whole == "split":
+                    refused_alone += 1
                 if single.whole == "unavailable":
-                    pacing.hold_origin(origin, clock() + max(single.retry_after, backoff))
+                    pacing.hold_origin(origin, max(single.retry_after, backoff), clock())
                     break
             for index in request:
                 if outcomes[index] is None:
                     outcomes[index] = Outcome(status=FAILED, reason="relay unavailable")
+            if refused_alone == len(request):
+                # Every entry was refused on its own as well, so no entry was
+                # the cause: the relay refuses this gateway's requests as such
+                # (a changed protocol, a smaller cap). Asking it 1 + N times on
+                # every notification would change nothing; it is left alone.
+                logger.warning("hermie: relay %s refused every message on its own as well", origin)
+                pacing.hold_origin(origin, BACKOFF_SECONDS, clock())
             continue
         for index, outcome in zip(request, answer.outcomes):
             outcomes[index] = outcome
         if answer.whole == "unavailable":
-            pacing.hold_origin(origin, clock() + max(answer.retry_after, backoff))
+            pacing.hold_origin(origin, max(answer.retry_after, backoff), clock())
 
 
 def send(
@@ -496,7 +546,7 @@ def send(
     *,
     post: Callable[[str, Dict[str, Any]], Reply] = _post,
     sleep: Callable[[float], None] = time.sleep,
-    clock: Callable[[], float] = time.time,
+    clock: Callable[[], float] = time.monotonic,
     pacing: Optional[Pacing] = None,
 ) -> List[Outcome]:
     """Every entry for one relay, within its limits, retried at most once.
@@ -554,5 +604,5 @@ def _finish(
     """Remember every handle the relay said is over its limit, and close the books."""
     for entry, outcome in zip(entries, outcomes):
         if outcome is not None and outcome.status == LIMITED and outcome.retry_after:
-            pacing.hold_handle(origin, str(entry.get("handle") or ""), now + outcome.retry_after, now)
+            pacing.hold_handle(origin, str(entry.get("handle") or ""), outcome.retry_after, now)
     return [outcome or Outcome(status=REJECTED, reason="not sent") for outcome in outcomes]

@@ -709,26 +709,28 @@ def test_an_empty_collapse_id_or_thread_is_left_out():
 # -- the relay's own numbers -------------------------------------------------
 #
 # The relay's protocol v1 (its `src/server/push/protocol.ts` and the protocol
-# document beside it): 20 messages a request, an 8,192-byte request body, a
-# 3,584-byte message, a 64-byte collapse id, a 256-character thread, and at
-# most 200 characters of handle or secret. When the relay's source is checked
-# out and `HERMIE_RELAY_REPO` points at it, the numbers are read from there.
+# document beside it): 20 messages a request, a 3,584-byte message, a 64-byte
+# collapse id, a 256-character thread, and at most 200 characters of handle or
+# secret. Its request-body cap is the relay's to raise; what is pinned here is
+# that this side's own, conservative cap fits under the smallest one the relay
+# has had (8 KB) and under whatever it has now. When the relay's source is
+# checked out and `HERMIE_RELAY_REPO` points at it, the numbers are read there.
 
 RELAY_LIMITS = {
     "MAX_MESSAGES_PER_REQUEST": 20,
-    "MAX_REQUEST_BYTES": 8 * 1024,
     "MAX_MESSAGE_BYTES": 3_584,
-    "MAX_COLLAPSE_ID_BYTES": 64,
 }
+RELAY_COLLAPSE_ID_BYTES = 64
+SMALLEST_RELAY_REQUEST_CAP = 8 * 1024
 
 
 def test_the_limits_are_the_relays_with_a_margin():
     from hermie_plugin.push import registrations
 
     assert relay.MAX_BATCH == RELAY_LIMITS["MAX_MESSAGES_PER_REQUEST"]
-    assert relay.MAX_REQUEST_BYTES < RELAY_LIMITS["MAX_REQUEST_BYTES"]
+    assert relay.MAX_REQUEST_BYTES < SMALLEST_RELAY_REQUEST_CAP
     assert relay.MAX_MESSAGE_BYTES <= RELAY_LIMITS["MAX_MESSAGE_BYTES"]
-    assert relay.MAX_COLLAPSE_ID_BYTES == RELAY_LIMITS["MAX_COLLAPSE_ID_BYTES"]
+    assert relay.MAX_COLLAPSE_ID_BYTES == RELAY_COLLAPSE_ID_BYTES
     assert relay.MAX_THREAD_CHARS == 256
     assert registrations.MAX_RELAY_FIELD == 200
 
@@ -744,13 +746,26 @@ def test_the_limits_match_the_relays_source_when_it_is_here():
         pytest.skip("the relay's source is not checked out here")
     text = source.read_text(encoding="utf-8")
 
-    def constant(name):
-        found = re.search(rf"export const {name} = ([0-9_ *]+);", text)
-        assert found, name
-        return eval(found.group(1).replace("_", ""), {})  # digits, `*` and spaces only
+    def constants(pattern):
+        found = {}
+        for name, expression in re.findall(rf"export const ({pattern}) = ([0-9_ *]+);", text):
+            found[name] = eval(expression.replace("_", ""), {})  # digits, `*` and spaces only
+        return found
 
     for name, value in RELAY_LIMITS.items():
-        assert constant(name) == value, name
+        assert constants(name) == {name: value}, name
+    # The request cap may be one constant or one per route; the send route's is
+    # the largest of them, and this side's cap must fit under every one.
+    caps = constants(r"MAX_[A-Z_]*REQUEST_BYTES")
+    assert caps, "no request-body cap found in the relay's source"
+    assert min(caps.values()) >= relay.MAX_REQUEST_BYTES, caps
+    # The collapse id's bound: a constant once, a pattern of printable ASCII now.
+    collapse = constants("MAX_COLLAPSE_ID_BYTES").get("MAX_COLLAPSE_ID_BYTES")
+    if collapse is None:
+        found = re.search(r"collapseId: z\.string\(\)\.regex\(/\^\[\\x21-\\x7E\]\{1,(\d+)\}\$/", text)
+        assert found, "no collapse id bound found in the relay's source"
+        collapse = int(found.group(1))
+    assert collapse == relay.MAX_COLLAPSE_ID_BYTES
     assert re.search(r"handle: z\.string\(\)\.max\(200\)", text)
     assert re.search(r"secret: z\.string\(\)\.max\(200\)", text)
     assert re.search(r"thread: z\.string\(\)\.min\(1\)\.max\(256\)", text)
@@ -1042,3 +1057,137 @@ def test_a_label_unfit_to_show_falls_back_to_the_profile_name(tmp_path, monkeypa
     wired(monkeypatch, fake)
     assert module.deliver(approval()) == 1
     assert fake.requests[0][1]["messages"][0]["message"]["title"] == "scout"
+
+
+# -- holds are bounded, and said once ----------------------------------------
+
+
+def test_a_huge_retry_after_buys_an_hour_not_forever(caplog):
+    def post(url, body):
+        return relay.Reply(status=429, retry_after=1_000_000_000)
+
+    clock = Clock()
+    pacing = relay.Pacing()
+    with caplog.at_level(logging.WARNING):
+        run(entries(1), post, clock, pacing)
+        run(entries(1), post, clock, pacing)  # deferred: no request, no second warning
+    assert pacing.origin_wait("https://push.hermie.dev", clock()) == relay.MAX_ORIGIN_HOLD_SECONDS
+    holds = [r for r in caplog.records if "left alone for" in r.getMessage()]
+    assert len(holds) == 1
+
+    clock.now += relay.MAX_ORIGIN_HOLD_SECONDS
+    assert run(entries(1), FakeRelay(), clock, pacing)[0].status == "sent"
+
+
+def test_a_huge_retry_after_on_one_handle_buys_a_day_at_most():
+    post, _ = answering_every_entry("limited", 10**12)
+    clock = Clock()
+    pacing = relay.Pacing()
+    outcome, = run(entries(1), post, clock, pacing)
+    assert outcome.retry_after == relay.MAX_HANDLE_HOLD_SECONDS
+    assert pacing.handle_wait("https://push.hermie.dev", "h_0000", clock()) == relay.MAX_HANDLE_HOLD_SECONDS
+
+
+def test_the_retry_after_header_is_read_within_bounds():
+    assert relay._retry_after({"Retry-After": "1000000000"}) == relay.MAX_HANDLE_HOLD_SECONDS
+    assert relay._retry_after({"Retry-After": "-5"}) == 0
+    assert relay._retry_after({"Retry-After": "soon"}) == 0
+
+
+def test_the_default_clock_does_not_jump_with_the_wall_clock():
+    import inspect
+    import time as time_module
+
+    assert inspect.signature(relay.send).parameters["clock"].default is time_module.monotonic
+
+
+def test_a_relay_that_refuses_every_message_alone_too_is_left_alone():
+    """No 1 + N requests on every notification when no entry is to blame."""
+    calls = []
+
+    def post(url, body):
+        calls.append(len(body["messages"]))
+        return relay.Reply(status=400)
+
+    clock = Clock()
+    pacing = relay.Pacing()
+    outcomes = run(entries(3), post, clock, pacing)
+    assert [outcome.status for outcome in outcomes] == ["rejected"] * 3
+    assert calls == [3, 1, 1, 1]
+    assert pacing.origin_wait("https://push.hermie.dev", clock()) == relay.BACKOFF_SECONDS
+
+    assert run(entries(3), post, clock, pacing)[0].status == "deferred"
+    assert calls == [3, 1, 1, 1]
+
+
+def test_one_bad_entry_does_not_put_the_relay_on_hold():
+    def post(url, body):
+        handles = [m["handle"] for m in body["messages"]]
+        if "h_0001" in handles:
+            return relay.Reply(status=400)
+        return relay.Reply(status=200, body={"results": [{"handle": h, "status": "sent"} for h in handles]})
+
+    clock = Clock()
+    pacing = relay.Pacing()
+    run(entries(3), post, clock, pacing)
+    assert pacing.origin_wait("https://push.hermie.dev", clock()) == 0
+
+
+# -- what is measured is what is sent ----------------------------------------
+
+
+def test_bytes_are_counted_as_sent_with_a_non_ascii_title_and_an_emoji(monkeypatch):
+    parsed = registration_of("i1", relay_row())
+    note = approval()
+    payload = note.payload(preview=False, gateway_key="bf796761db84e312")
+    entry = relay.message_for(parsed, payload, title="Zoë the Owl 🦉", body="Needs your approval")
+
+    sent = []
+
+    class Opener:
+        def open(self, request, timeout):
+            sent.append(request.data)
+            raise OSError("not on the wire in a test")
+
+    monkeypatch.setattr(relay.urllib.request, "build_opener", lambda *handlers: Opener())
+    with pytest.raises(OSError):
+        relay._post("https://push.hermie.dev/v1/send", {"v": 1, "messages": [entry]})
+    assert sent[0] == relay.encode_request([entry])
+    # One request of exactly that size is what `plan_requests` budgets for.
+    assert relay.plan_requests([entry]) == [[0]]
+
+
+def test_too_large_measures_a_message_the_way_the_relay_does():
+    """The relay measures `JSON.stringify(message)` in UTF-8: compact, nothing escaped."""
+    parsed = registration_of("i1", relay_row())
+
+    def entry_with_body(text):
+        return relay.message_for(parsed, {"type": "message", "bot": "scout", "eventId": "e"}, title="t", body=text)
+
+    base = len(json.dumps(entry_with_body("")["message"], separators=(",", ":"), ensure_ascii=False).encode())
+    room = relay.MAX_MESSAGE_BYTES - base
+    owls = "🦉" * (room // 4)
+    filler = "x" * (room - len(owls) * 4)
+    exact = entry_with_body(owls + filler)
+    assert len(json.dumps(exact["message"], separators=(",", ":"), ensure_ascii=False).encode()) == relay.MAX_MESSAGE_BYTES
+    assert relay.too_large(exact) is False
+    # Escaped, as Python would write it by default, the same message is far bigger;
+    # the relay does not count it that way, and neither does this side.
+    assert len(json.dumps(exact["message"]).encode()) > relay.MAX_MESSAGE_BYTES
+    assert relay.too_large(entry_with_body(owls + filler + "x")) is True
+
+
+@pytest.mark.parametrize("event_id", ["", "has space", "tab\there", "é-accent", "x" * 65])
+def test_a_collapse_id_the_relay_would_refuse_is_left_out(event_id):
+    """The relay takes 1 to 64 printable ASCII characters, and refuses the message otherwise."""
+    parsed = registration_of("i1", relay_row())
+    entry = relay.message_for(parsed, {"type": "message", "bot": "scout", "eventId": event_id}, title="t", body="b")
+    collapse = entry["message"].get("collapseId")
+    assert collapse is None or (collapse == event_id[:64] and collapse.isascii() and collapse.isprintable() and " " not in collapse)
+
+
+def test_an_event_id_is_a_collapse_id_as_it_stands():
+    note = approval()
+    parsed = registration_of("i1", relay_row())
+    entry = relay.message_for(parsed, note.payload(preview=False), title="t", body="b")
+    assert entry["message"]["collapseId"] == note.event_id
