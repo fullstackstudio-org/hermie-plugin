@@ -26,6 +26,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
+from .events import category_for, channel_for
+
 logger = logging.getLogger(__name__)
 
 SEND_URL = "https://exp.host/--/api/v2/push/send"
@@ -167,16 +169,21 @@ def message_for(token: str, payload: Dict[str, Any], *, title: str, body: str) -
     kind, never what was said, so the caller decides those two strings and this
     function does not enrich them.
     """
-    return {
+    message = {
         "to": token,
         "title": title,
         "body": body,
         "data": payload,
         "sound": "default",
         # A stable channel so Android users can silence one kind of notification
-        # without silencing Hermie, and a category so iOS can attach the
-        # Allow/Deny actions the app registered.
-        "channelId": str(payload.get("type") or "message"),
-        "categoryId": str(payload.get("type") or "message"),
+        # without silencing Hermie: the type name, as the push contract says.
+        "channelId": channel_for(payload),
         "priority": "high",
     }
+    # The category is what attaches the Allow/Deny actions the app registered,
+    # and only an approval has an answer to give. It was the bare type once,
+    # which no app registered, so approvals arrived without their buttons.
+    category = category_for(payload)
+    if category:
+        message["categoryId"] = category
+    return message

@@ -4,6 +4,22 @@ Notable changes per release. Capabilities are listed by the string the app tests
 for, because that is what the app tests for — a version number here is for
 people.
 
+## Unreleased
+
+### Fixed
+
+- **An approval arrives with its Allow and Deny buttons again.** Expo messages were posted under the
+  bare type (`request`) as their category, which no app ever registered, so the buttons never
+  appeared. An approval that names its request is now posted under `hermie.request`, the category
+  the app registers; nothing else carries a category, because nothing else has an answer a button
+  could send. The Android channel stays the type name.
+- **A request says which kind it is.** Its payload now carries `method` — `approval` or `clarify` —
+  which is how a sender decides whether the buttons apply. The request id still travels as
+  `requestId`.
+- **Web Push carries the payload where the browser looks for it.** The message was flat, and the
+  app's service worker reads the payload under `data`, so it found no bot to open. It is now
+  `{title, body, data}`, the same shape Hermie Web sends.
+
 ## 0.9.0 — 2026-09-24
 
 ### Removed

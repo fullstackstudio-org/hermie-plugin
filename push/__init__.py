@@ -306,7 +306,10 @@ class PushModule:
             registration.endpoint or "",
             registration.keys.get("p256dh", ""),
             registration.keys.get("auth", ""),
-            {**payload, "title": title, "body": body},
+            # The shape the app's service worker reads: the two visible
+            # strings, and the payload under `data`. It was flat once, and the
+            # worker found no bot in it — so a tap opened nothing in particular.
+            {"title": title, "body": body, "data": payload},
             contact=str(self.runtime.config("push.vapid_contact", "") or ""),
         )
         if result.device_gone:

@@ -63,6 +63,41 @@ TYPES = PUSH_TYPES
 # waiting to notice that it did not work.
 NEVER_SUPPRESSED = ("request", "cron", "cron_failed", "turn_failed")
 
+# -- the shared push contract --------------------------------------------------
+#
+# Every sender and every app generation conform to one contract file, kept in
+# the app's repository as `contract/push/contract.json`; `tests/fixtures/
+# push_contract.json` is this repo's copy of it. Three of its ids are decided
+# by the SENDER and they live here so that no transport spells them on its own:
+#
+# - the notification category, which is what grows the Allow and Deny buttons.
+#   It is `hermie.request`, and only on an approval: a clarify question has no
+#   answer a button could send. The action ids inside it are registered by the
+#   app, never sent, so they are not named here;
+# - the Android channel, which is the type name — one channel per type;
+# - the request a notification was raised for, which travels as `requestId`.
+#
+# This plugin once put the TYPE in the category (`request`), which no app ever
+# registered, so an approval arrived without its buttons.
+REQUEST_CATEGORY = "hermie.request"
+
+
+def category_for(payload: Dict[str, Any]) -> str:
+    """The category one payload is posted under, or ``""`` for none.
+
+    An approval that names no request gets no buttons either: the app would
+    turn an Allow without a request id into a plain open anyway, and a button
+    that cannot do what it says is worse than no button.
+    """
+    if payload.get("type") == "request" and payload.get("method") == "approval" and payload.get("requestId"):
+        return REQUEST_CATEGORY
+    return ""
+
+
+def channel_for(payload: Dict[str, Any]) -> str:
+    """The Android channel: the type name, which is what the contract says."""
+    return str(payload.get("type") or "message")
+
 
 @dataclass(frozen=True)
 class Notification:
@@ -169,7 +204,12 @@ def from_approval(
     question, and it is the same answer core's own unattended-approval check
     arrives at from the same signal.
     """
-    extra: Dict[str, Any] = {"requestId": str(request_id or "")} if request_id else {}
+    # `method` is what tells a sender this request can be answered with a
+    # button, and it is how the contract decides the category. See
+    # `category_for`.
+    extra: Dict[str, Any] = {"method": "approval"}
+    if request_id:
+        extra["requestId"] = str(request_id)
     extra.update(_cron_extra(cron))
     return Notification(
         type="request",
@@ -209,7 +249,7 @@ def from_clarify(
         session_id=session_id,
         at=at,
         event_id=event_id("clarify", session_id, tool_call_id),
-        extra=_cron_extra(cron),
+        extra={"method": "clarify", **_cron_extra(cron)},
     )
 
 
