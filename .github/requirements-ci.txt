@@ -1,0 +1,39 @@
+# What the `test` job installs: the packages the Hermes runtime provides to a
+# plugin, every one at the version in Hermes's own uv.lock at the fork commit
+# pinned in scanner-pins.json (9cfa68a1), so the tests run against what the
+# gateways run. pytest is in that lock too.
+#
+# Not "whatever is newest": FastAPI 0.142 changed how an app lists its included
+# routes and three route tests then fail on a harness assumption, not on the
+# plugin. A newer version is tried by bumping it here in a pull request, and a
+# fork pin that moves in scanner-pins.json is the moment to compare this file
+# with the new lock again.
+#
+# The first block is what the tests import; the second is what those resolve to.
+# The plugin itself has no third-party dependency (python_dependencies in
+# plugin.yaml stays empty): none of this ships.
+
+pytest==9.1.1
+fastapi==0.133.1
+starlette==1.3.1
+httpx==0.28.1
+cryptography==50.0.0
+pyyaml==6.0.3
+
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.12.1
+certifi==2026.5.20
+cffi==2.0.0
+h11==0.16.0
+httpcore==1.0.9
+idna==3.18
+iniconfig==2.3.0
+packaging==26.0
+pluggy==1.6.0
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+Pygments==2.20.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0

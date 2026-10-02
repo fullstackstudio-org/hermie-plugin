@@ -449,6 +449,86 @@ The repo root is the plugin package — Hermes imports the directory — so `tes
 builds the same package rather than inventing an import path production never
 uses, and the run is rooted below the root's `__init__.py`.
 
+### Continuous integration
+
+Every pull request and every push to `main` runs `.github/workflows/ci.yml` on
+GitHub-hosted runners. It needs no secret and asks for none.
+
+| Job | Runs | Takes |
+|---|---|---|
+| `test` | the test suite on Python 3.11 against the package versions Hermes itself locks, a compile of every module, and a check that nothing was skipped for a reason that is not expected | about a minute |
+| `guard-scan` | Hermes's plugin scanner, from the fork and from upstream, each at the commit named in `.github/scanner-pins.json`, over this checkout; fails on anything but `safe` | about a minute |
+| `web-bundle-verify` | **a placeholder, not yet active.** It becomes the check that a client bundle is the byte-for-byte build of reviewed, merged source. Until then it verifies nothing about a bundle and only refuses a `dashboard/app/` (a folder, a file or a dangling symlink) that arrives before that check exists | seconds |
+
+`guard-scan` is not a style check. Hermes scans this tree again after every
+`hermes plugins update`, and a `dangerous` verdict **disables the plugin on that
+gateway**, push notifications included, until someone re-enables it by hand. The
+job runs that same scan before a change is merged. A daily run
+(`.github/workflows/scanner-nightly.yml`) asks the same of the newest scanners and
+only reports. `CONTRIBUTING.md` says how to run the scan on your own machine and
+how to move a pin.
+
+### Branch protection
+
+`main` deploys itself to the gateways within about fifteen minutes of a push, so a
+check that runs after the push is a report, not a gate. What makes the checks
+binding is a rule on `main`, which only a repository admin can set (Settings,
+Branches, or the API). The settings this repository is written for:
+
+- **Require a pull request before merging.** Nothing is pushed to `main`
+  directly, release commits included.
+- **Require status checks to pass**, and require the branch to be up to date:
+  `test`, `guard-scan` and `web-bundle-verify`. The last is a placeholder today
+  and passes when there is no `dashboard/app/`; being required is what stops a
+  pull request that adds one from merging before the real verification exists.
+  Its name does not change when the real job replaces it, so this setting does
+  not either. Not the nightly run: it belongs to no pull request and cannot be
+  required.
+- **Do not allow bypassing the rule**, administrators included, and **block force
+  pushes and deletion** of `main`.
+- **Approvals**: one approving review is the right setting once a second person
+  maintains the repository. With a single maintainer it makes every pull request
+  unmergeable by its author, so leave it at zero and keep the review in the
+  pull request itself: the checklist in `.github/PULL_REQUEST_TEMPLATE.md`,
+  ticked, with the reviewer's comment.
+- Under Settings, Actions: default workflow permissions **read**, and approval
+  required before a first-time contributor's workflow runs.
+
+The same rule as one API call, run by an admin. The checks are bound to GitHub
+Actions (app id 15368, from `gh api /apps/github-actions`), so another app cannot
+report a check of the same name and satisfy the rule:
+
+```
+gh api -X PUT repos/OWNER/hermie-plugin/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "checks": [
+      { "context": "test", "app_id": 15368 },
+      { "context": "guard-scan", "app_id": 15368 },
+      { "context": "web-bundle-verify", "app_id": 15368 }
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": { "required_approving_review_count": 0, "dismiss_stale_reviews": true },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+```
+
+`enforce_admins: true` applies to the maintainer too: once it is set, their own
+direct push to `main` is refused like anyone else's. The release flow in
+`CONTRIBUTING.md` therefore goes through a pull request first, and only the tag
+is pushed directly.
+
+A web client bundle is imported only through a pull request, and the template
+carries the checklist for one: only `dashboard/app/**`, the version and the
+changelog change, `build.json` names a source commit on the app repository's
+`main`, `guard-scan` is green, and `web-bundle-verify` is the real job rather
+than the placeholder. Reverting the import commit is the rollback.
+
 ## Memory
 
 The app can browse and edit a profile's `MEMORY.md` and `USER.md`. This is the

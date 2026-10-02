@@ -1,0 +1,10 @@
+# Keeps the pinned action SHAs in .github/workflows current. Each bump arrives as
+# a pull request and goes through the same checks as any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"

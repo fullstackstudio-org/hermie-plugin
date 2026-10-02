@@ -8,6 +8,10 @@ people.
 
 ### Added
 
+- **Continuous integration.** Pull requests and pushes to `main` run the tests and the Hermes plugin
+  scanner (the fork's and upstream's, each at a pinned commit) and must pass before a merge once branch
+  protection is set; a daily run asks the same of the newest scanners. The workflows need no secret and
+  nothing in them ships to a gateway.
 - **`push.relay`: notifications reach the native Apple apps through a push relay.** A device running the
   native Hermie app on an iPhone, iPad or Mac registers with a relay and writes a row with
   `transport: relay`, its `handle` there and a `secret` that can send to that one device. This gateway

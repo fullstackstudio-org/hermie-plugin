@@ -1,0 +1,45 @@
+name: Scanner, newest versions
+
+# Would the newest Hermes plugin scanner still call this tree `safe`? The pinned
+# run in ci.yml answers for the scanner we chose; this answers for the one the
+# gateways will have after their next Hermes update, so a stricter rule shows up
+# here first, on a quiet day, and not as a plugin switched off after an update.
+#
+# It reports and blocks nothing: a scheduled run belongs to no pull request, so it
+# cannot hold a merge, and its job is not a required check. A red run here means
+# "look at the scanner's report, then fix the plugin or move the pins".
+#
+# Scheduled workflows run on the default branch only, and GitHub turns them off
+# after sixty days without a commit. If this stops appearing in the Actions tab,
+# enable it again there.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  guard-scan-latest:
+    name: guard-scan (newest scanners, informational)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      # `--latest` fetches the branch named under "latest" in scanner-pins.json
+      # for each scanner, instead of the pinned commit. The report names the
+      # commit it got.
+      - name: Scan the tree with the newest scanners
+        run: python scripts/guard_scan.py --latest --workdir "$RUNNER_TEMP/scanners"
