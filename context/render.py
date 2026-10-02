@@ -18,6 +18,7 @@ below is the one place that knows both forms name one person.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Tuple
 
 # The provider prefix on a gateway login, and the whole subtlety of reading it:
@@ -134,11 +135,28 @@ def _text(value: Any, limit: int) -> str:
 
 
 # What is left of a string after `_text` has flattened its whitespace, and has
-# no business in a name: control and format characters, the zero-width run, and
-# the bidi overrides that can make text render in an order it is not written in.
-CONTROL = re.compile(
-    r"[\x00-\x1f\x7f-\x9f​-‏  ‪-‮⁠-⁤⁦-⁯﻿]"
-)
+# no business in a name: control and format characters, the zero-width run, the
+# bidi overrides that can make text render in an order it is not written in, the
+# soft hyphen, the Arabic letter mark, the tag characters and the variation
+# selectors. Decided by Unicode category rather than by a list of ranges, so a
+# character added to the standard later is covered without an edit, and written
+# without a single literal invisible character, because one in this file is both
+# invisible to a reader and a finding for the Hermes plugin scanner.
+_STRIPPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_VARIATION_SELECTORS = ((0x180B, 0x180D), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF))
+
+
+def _is_invisible(char: str) -> bool:
+    if unicodedata.category(char) in _STRIPPED_CATEGORIES:
+        return True
+    code = ord(char)
+    return any(low <= code <= high for low, high in _VARIATION_SELECTORS)
+
+
+def strip_invisible(text: str) -> str:
+    """`text` without any character `_is_invisible` names."""
+    return "".join(char for char in text if not _is_invisible(char))
+
 
 # And the punctuation that turns a line of a prompt into structure: a heading, a
 # rule, a fence, emphasis, a quote, a link, a tag. A name that is only these is
@@ -157,7 +175,7 @@ def _safe(value: Any, limit: int) -> str:
     so a sentence somebody buried in a login reads as part of it rather than as
     a sentence of the section's own.
     """
-    text = MARKUP.sub("", CONTROL.sub("", _text(value, limit)))
+    text = MARKUP.sub("", strip_invisible(_text(value, limit)))
     return " ".join(text.split())
 
 

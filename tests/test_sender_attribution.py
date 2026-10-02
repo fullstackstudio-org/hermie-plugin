@@ -32,6 +32,7 @@ from hermie_plugin.context.render import (
     UNCONFIRMED_RUNGS,
     VERIFIED_RUNGS,
     sender_sentence,
+    strip_invisible,
 )
 from hermie_plugin.context.session_vars import SESSION_ID, UI_SESSION_ID, USER_ID, SessionVars
 from hermie_plugin.context.turn_claim import TurnClaims
@@ -109,6 +110,62 @@ def test_a_login_from_outside_is_cleaned_like_any_other_input():
     assert "  " not in said, "markup removal left a doubled space uncollapsed"
     for markup in ('"', "##"):
         assert markup not in said
+
+
+STRIPPED = [
+    "\x00", "\x1f", "\x7f", "\x85", "\x9f",  # C0 and C1 controls
+    "\u00ad",  # soft hyphen
+    "\u061c",  # Arabic letter mark
+    "\u180e",  # Mongolian vowel separator
+    "\u200b", "\u200c", "\u200d", "\u200e", "\u200f",  # zero-width run and the marks
+    "\u2028", "\u2029",  # line and paragraph separators
+    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",  # bidi embeddings and overrides
+    "\u2060", "\u2064", "\u2066", "\u2069", "\u206f",  # word joiner, invisible operators, isolates
+    "\ufeff",  # byte order mark
+    "\ufff9", "\ufffa", "\ufffb",  # interlinear annotation
+    "\U000e0001", "\U000e0020", "\U000e007f",  # tag characters
+    "\u180b", "\ufe00", "\ufe0f", "\U000e0100", "\U000e01ef",  # variation selectors
+]
+
+KEPT = [" ", "a", "Z", "7", "-", "_", ".", ":", "\u00e9", "\u00df", "\u4e2d", "\u0627", "\u202f", "\u2010", "\U0001f600"]
+
+
+@pytest.mark.parametrize("char", STRIPPED, ids=lambda c: f"U+{ord(c):04X}")
+def test_every_invisible_character_is_stripped_from_a_login(char):
+    assert strip_invisible(f"Jo{char}hn") == "John"
+
+
+@pytest.mark.parametrize("char", KEPT, ids=lambda c: f"U+{ord(c):04X}")
+def test_what_a_name_is_made_of_is_kept(char):
+    assert strip_invisible(f"Jo{char}hn") == f"Jo{char}hn"
+
+
+def test_the_stripped_set_is_exactly_what_the_categories_and_selectors_say():
+    """Over every code point, so a character the lists above forgot cannot slip by."""
+    import unicodedata
+
+    selectors = (
+        set(range(0x180B, 0x180E)) | set(range(0xFE00, 0xFE10)) | set(range(0xE0100, 0xE01F0))
+    )
+    for code in range(0x110000):
+        if 0xD800 <= code <= 0xDFFF:
+            continue
+        char = chr(code)
+        expected = unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} or code in selectors
+        assert (strip_invisible(char) == "") is expected, f"U+{code:04X}"
+
+
+@pytest.mark.parametrize("char", [c for c in STRIPPED if not c.isspace()], ids=lambda c: f"U+{ord(c):04X}")
+def test_a_login_loses_the_invisible_character_on_its_way_into_the_sentence(char):
+    assert "oidc:John" in sender_sentence(f"oidc:Jo{char}hn")
+
+
+def test_a_login_keeps_its_spaces():
+    """The pattern this replaced held two plain spaces where U+2028 and U+2029
+    belong: the two were typed into the file literally and an editor turned them
+    into spaces, so every space in a login was removed."""
+    assert "oidc:Jo Smith" in sender_sentence("oidc:Jo Smith")
+    assert "oidc:Jo Smith Jr" in sender_sentence("oidc:Jo\u2028Smith\u2029Jr")
 
 
 def test_the_login_keeps_a_cap():

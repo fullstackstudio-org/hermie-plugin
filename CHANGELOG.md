@@ -77,6 +77,14 @@ people.
 - **Web Push carries the payload where the browser looks for it.** The message was flat, and the
   app's service worker reads the payload under `data`, so it found no bot to open. It is now
   `{title, body, data}`, the same shape Hermie Web sends.
+- **A sender's login loses every invisible character, and keeps its spaces.** The pattern that stripped
+  format characters from a login held two plain spaces where U+2028 and U+2029 belong, so every space
+  in the name was removed before it was named in the sentence about who sent a turn. It is dormant
+  today (no rung is verified). The stripping now goes by Unicode category (control, format, line and
+  paragraph separators) plus the variation selectors, which also covers the soft hyphen, the Arabic
+  letter mark, the tag characters and the interlinear annotation marks that the old list missed. No
+  invisible character is written literally in the source any more, which is also what had made the
+  Hermes plugin scanner give the whole plugin a `caution` verdict.
 
 ## 0.9.0 — 2026-09-24
 
