@@ -71,11 +71,13 @@ REQUEST_VERSION = 1
 # The relay takes 1 to 20 messages a request, each authorised on its own.
 MAX_BATCH = 20
 
-# The relay refuses a request body over 8 KB (8,192 bytes) as a whole, with a
-# 413 — and a refused request has answered for nobody. Twenty real approvals
-# are about 12 KB, so requests are cut by their encoded size as well as by
-# count, and kept a margin under the relay's cap. The relay does not advertise
-# a larger cap; if it ever does, this is the number to read it into.
+# The relay refuses a request body over its cap as a whole, with a 413 — and a
+# refused request has answered for nobody. That cap is the relay's to set and
+# to raise (it began at 8 KB), and the relay does not advertise it, so this is
+# the plugin's own conservative limit: under every cap the relay has had.
+# Twenty real approvals are about 12 KB, so requests are cut by their encoded
+# size as well as by count. If the relay ever advertises its cap, this is the
+# number to read it into.
 MAX_REQUEST_BYTES = 7_680
 
 # The relay's cap on one `message`, as serialised JSON, is 3,584 bytes; this
