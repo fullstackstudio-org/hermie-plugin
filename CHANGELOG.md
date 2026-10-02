@@ -50,8 +50,12 @@ people.
 - **A notification is titled with the bot's display name.** Where the profile has a `display_name`
   (the label `PATCH /api/plugins/hermie/profiles/{name}` sets), every transport shows it as the
   title instead of the profile name. `data.bot` is still the profile name, which is what a tap is
-  resolved against. A label that is empty, longer than 60 characters or has control characters in
-  it is ignored.
+  resolved against. A label that is empty, longer than 60 characters or has control or formatting
+  characters in it is ignored.
+- **A display name may not carry invisible formatting characters.** `PATCH
+  /api/plugins/hermie/profiles/{name}` now also refuses, with a 400, a bidi override (which makes a
+  name read backwards), a zero-width space or joiner, and a line or paragraph separator — Unicode
+  categories Cc, Cf, Zl and Zp. An emoji built with a zero-width joiner is refused with them.
 
 ### Fixed
 

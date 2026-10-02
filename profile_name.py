@@ -33,6 +33,7 @@ lines are kept here instead.
 
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 from typing import Any, List
 
@@ -45,6 +46,15 @@ NAME = "profiles"
 # control characters the file format tolerates but no UI should have to
 # render.
 MAX_DISPLAY_NAME_LENGTH = 60
+
+# Characters a label is refused for, by Unicode category. Cc is the control
+# characters, C0 and C1. Cf is the invisible formatting ones — the bidi
+# overrides that make a name read backwards (U+202E), zero-width spaces and
+# joiners — and Zl/Zp are the line and paragraph separators. A display name is
+# shown on lock screens and in the app as the bot's name, and none of these
+# belongs in a name somebody is asked to recognise. That also refuses an emoji
+# built with a zero-width joiner, which is the price of refusing the rest.
+UNFIT_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 class ProfileNameUnavailable(RuntimeError):
@@ -159,8 +169,8 @@ def clean_display_name(value: Any) -> str:
         raise DisplayNameRefused(
             f"display_name must be {MAX_DISPLAY_NAME_LENGTH} characters or fewer"
         )
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in cleaned):
-        raise DisplayNameRefused("display_name must not contain control characters")
+    if any(unicodedata.category(ch) in UNFIT_CATEGORIES for ch in cleaned):
+        raise DisplayNameRefused("display_name must not contain control or formatting characters")
     return cleaned
 
 

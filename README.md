@@ -509,7 +509,8 @@ label, on any profile, through the very function core's own route calls for
 id, the directory or anything else in the profile.
 
 - **400** — the name is empty once trimmed, over 60 characters, or carries a
-  control character.
+  control character, an invisible formatting character (a bidi override, a
+  zero-width space or joiner) or a line or paragraph separator.
 - **403** — `profiles.edit` is off for *that* profile (see below).
 - **404** — no such profile on this gateway. Not the 400 `memory`'s routes give
   a bad profile: those fold "not a valid name" and "not one that exists" into

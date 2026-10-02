@@ -89,19 +89,24 @@ class Runtime:
         """The name this bot is shown under, or ``""`` when it has none.
 
         `display_name` in the profile's own `profile.yaml` — the label a person
-        gave the bot, which `profiles.display_name` also writes. Only a
-        label fit to show is returned: a string, trimmed, at most 60
-        characters and free of control characters, which is the rule that
-        route applies on the way in. Anything else reads as "no label", and
-        the caller falls back to the profile name.
+        gave the bot, which `profiles.display_name` also writes. Only a label
+        that route would accept is returned, checked by the very function it
+        uses (`profile_name.clean_display_name`): a string, trimmed, at most 60
+        characters, with no control, invisible formatting (bidi overrides,
+        zero-width characters) or line-separator characters. The file can be
+        written by other hands than that route, so it is checked again here.
+        Anything else reads as "no label", and the caller falls back to the
+        profile name.
         """
+        from .profile_name import DisplayNameRefused, clean_display_name
+
         value = uimeta.read_display_name(self.home)
         if not isinstance(value, str):
             return ""
-        text = value.strip()
-        if not text or len(text) > 60 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        try:
+            return clean_display_name(value)
+        except DisplayNameRefused:
             return ""
-        return text
 
     def app_sections(self) -> List[Tuple[str, Any]]:
         """Every bag the app owns, as `(user id, value)`, in precedence order.

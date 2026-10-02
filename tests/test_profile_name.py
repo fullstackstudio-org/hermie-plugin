@@ -123,10 +123,28 @@ def test_a_display_name_at_the_limit_is_accepted():
     assert profile_name.clean_display_name(value) == value
 
 
-@pytest.mark.parametrize("value", ["Ju\x00rist", "Jurist\x07", "a\nb", "a\tb"])
-def test_a_control_character_is_refused(value):
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Ju\x00rist", "Jurist\x07", "a\nb", "a\tb",
+        "a\x85b",          # C1 control (NEL)
+        "\u202etsiruJ",    # right-to-left override: reads as "Jurist" backwards
+        "Ju\u200brist",    # zero-width space
+        "Ju\u200drist",    # zero-width joiner
+        "Ju\u2066rist",    # left-to-right isolate
+        "a\u2028b",        # line separator
+        "a\u2029b",        # paragraph separator
+        "\ufeffJurist",    # byte order mark
+    ],
+)
+def test_a_control_or_formatting_character_is_refused(value):
     with pytest.raises(profile_name.DisplayNameRefused):
         profile_name.clean_display_name(value)
+
+
+@pytest.mark.parametrize("value", ["Zoë", "Ünïcödé Bot", "研究助手", "Owl 🦉", "Café ☕️"])
+def test_ordinary_unicode_is_accepted(value):
+    assert profile_name.clean_display_name(value) == value
 
 
 def test_surrounding_whitespace_is_trimmed():

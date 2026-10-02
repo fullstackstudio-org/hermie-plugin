@@ -1129,7 +1129,11 @@ def test_every_transport_shows_the_bots_display_name(tmp_path, monkeypatch):
     assert relay_message["thread"].endswith(":scout")
 
 
-@pytest.mark.parametrize("value", [None, "", "   ", 42, ["x"], "x" * 61, "two\nlines", "bell\x07"])
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "   ", 42, ["x"], "x" * 61, "two\nlines", "bell\x07",
+     "\u202etuocS", "Sc\u200bout", "a\u2028b", "a\u2029b", "a\x85b"],
+)
 def test_a_label_unfit_to_show_falls_back_to_the_profile_name(tmp_path, monkeypatch, value):
     home, module = gateway(tmp_path, monkeypatch, {"i1": relay_row()})
     with_display_name(home, value)
@@ -1271,3 +1275,24 @@ def test_an_event_id_is_a_collapse_id_as_it_stands():
     parsed = registration_of("i1", relay_row())
     entry = relay.message_for(parsed, note.payload(preview=False), title="t", body="b")
     assert entry["message"]["collapseId"] == note.event_id
+
+
+def test_a_bidi_override_never_reaches_a_lock_screen(tmp_path, monkeypatch):
+    """U+202E would make the title read backwards, posing as another bot."""
+    home, module = gateway(tmp_path, monkeypatch, {"i1": relay_row()})
+    with_display_name(home, "‮toB knaB")
+    fake = FakeRelay()
+    wired(monkeypatch, fake)
+    module.deliver(approval())
+    title = fake.requests[0][1]["messages"][0]["message"]["title"]
+    assert title == "scout"
+    assert "‮" not in json.dumps(fake.requests, ensure_ascii=False)
+
+
+def test_a_unicode_display_name_is_shown(tmp_path, monkeypatch):
+    home, module = gateway(tmp_path, monkeypatch, {"i1": relay_row()})
+    with_display_name(home, "Zoë the Owl 🦉")
+    fake = FakeRelay()
+    wired(monkeypatch, fake)
+    module.deliver(approval())
+    assert fake.requests[0][1]["messages"][0]["message"]["title"] == "Zoë the Owl 🦉"
