@@ -43,9 +43,9 @@ and is dropped whichever transport it claims.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
 from urllib.parse import urlsplit
 
 from .gateway_key import is_gateway_key, origin_of
@@ -56,9 +56,13 @@ SECTION_VERSION = 1
 # Apple's push service, and only Apple's platforms have a device there.
 RELAY_PLATFORMS = ("ios", "macos")
 
-# Generous for a handle and a 32-byte secret in base64url, and a bound all the
-# same: a row is input, and a field this long is not a credential anybody issued.
-MAX_RELAY_FIELD = 512
+# A handle and a send secret are what the relay issued: base64url text, and the
+# relay takes at most 200 characters of either. A row is input, and one entry
+# the relay cannot read fails the whole request it travels in — every other
+# device's notification with it — so a field outside these bounds is dropped
+# here, on the way in. `tests/test_relay.py` pins this to the relay's limit.
+MAX_RELAY_FIELD = 200
+RELAY_FIELD = re.compile(r"[A-Za-z0-9_-]{1,%d}" % MAX_RELAY_FIELD)
 
 # Every event a device can ask about, and every one it can be sent — ONE list,
 # which `push/events.py` re-exports as `TYPES`. They were two tuples once, and
@@ -360,7 +364,7 @@ def relay_origin(value: Any) -> str:
 
 def _relay_field(value: Any) -> str:
     text = _text(value)
-    return text if 0 < len(text) <= MAX_RELAY_FIELD and text == text.strip() else ""
+    return text if RELAY_FIELD.fullmatch(text) else ""
 
 
 def registration_of(installation_id: str, value: Any, user_id: str = "") -> Optional[Registration]:

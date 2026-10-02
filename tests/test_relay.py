@@ -107,9 +107,18 @@ def test_an_origin_is_read_the_way_a_browser_writes_it():
 
 
 @pytest.mark.parametrize("field", ["handle", "secret"])
-@pytest.mark.parametrize("value", [None, "", "   ", 7, True, {"a": 1}, "x" * 513, " padded "])
-def test_the_handle_and_secret_are_non_empty_strings(field, value):
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "   ", 7, True, {"a": 1}, "x" * 201, " padded ", "a b", "a/b", "a+b", "abc=", "h_\u00e9t\u00e9", "a\nb"],
+)
+def test_the_handle_and_secret_are_what_the_relay_issues(field, value):
+    """base64url, 1 to 200 characters: one field the relay cannot read fails a whole request."""
     assert registration_of("i1", relay_row(**{field: value})) is None
+
+
+@pytest.mark.parametrize("field", ["handle", "secret"])
+def test_the_longest_field_the_relay_takes_is_read(field):
+    assert registration_of("i1", relay_row(**{field: "x" * 200})) is not None
 
 
 def test_a_row_never_carries_both_a_token_and_a_handle():
@@ -223,15 +232,38 @@ class FakeRelay:
 REAL_SEND = relay.send
 
 
-def wired(monkeypatch, fake, sleeps=None):
-    """Route the module's relay sends through *fake*, recording every wait."""
-    real_send = REAL_SEND
-    record = sleeps if sleeps is not None else []
+class Clock:
+    """A clock that only moves when the code under test sleeps."""
+
+    def __init__(self, now=1_790_000_000.0):
+        self.now = now
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def wired(monkeypatch, fake, clock=None):
+    """Route the module's relay sends through *fake*, on a clock of the test's own."""
+    clock = clock or Clock()
     monkeypatch.setattr(
         push_pkg.relay, "send",
-        lambda origin, entries: real_send(origin, entries, post=fake, sleep=record.append),
+        lambda origin, entries, **options: REAL_SEND(
+            origin, entries, post=fake, sleep=clock.sleep, clock=clock, **options
+        ),
     )
-    return record
+    return clock
+
+
+def run(entries, post, clock=None, pacing=None):
+    clock = clock or Clock()
+    return relay.send(
+        "https://push.hermie.dev", entries, post=post, sleep=clock.sleep, clock=clock, pacing=pacing
+    )
 
 
 def approval(request_id="r1"):
@@ -345,12 +377,66 @@ def entries(count):
     return [{"handle": f"h_{index:04d}", "secret": "s", "message": {}} for index in range(count)]
 
 
+def realistic_entries(count):
+    """What the module really builds for an approval: about 600 bytes apiece."""
+    rows = []
+    for index in range(count):
+        row = registration_of(
+            f"i{index}",
+            relay_row(handle=f"h_{index:022d}", secret="S" * 43, gatewayKey="bf796761db84e312"),
+        )
+        note = events.from_approval(
+            bot="research-assistant", session_key="20261002_101500_" + "a" * 16,
+            description="d", request_id="req-" + "b" * 32, turn_id="t1", at=1790000000,
+            cron=None,
+        )
+        payload = note.payload(preview=False, gateway_key="bf796761db84e312", session_kind="canonical")
+        title, body = note.rendered(preview=False)
+        rows.append(relay.message_for(row, payload, title=title, body=body, gateway_key="bf796761db84e312"))
+    return rows
+
+
+def test_a_realistic_entry_is_the_size_the_limits_were_set_for():
+    size = len(json.dumps(realistic_entries(1)[0], separators=(",", ":")).encode())
+    assert 450 < size < 800
+
+
+def test_twenty_realistic_entries_go_out_under_the_relays_byte_cap():
+    fake = FakeRelay()
+    outcomes = run(realistic_entries(20), fake)
+    assert all(outcome.status == "sent" for outcome in outcomes)
+    assert sum(len(body["messages"]) for _, body in fake.requests) == 20
+    assert len(fake.requests) >= 2, "twenty approvals do not fit one 8 KB request"
+    for _, body in fake.requests:
+        assert len(relay.encode_request(body["messages"])) <= relay.MAX_REQUEST_BYTES
+        assert len(body["messages"]) <= relay.MAX_BATCH
+
+
+def test_the_request_is_measured_as_it_is_sent():
+    """`_post` encodes with exactly the bytes `plan_requests` counted."""
+    sample = realistic_entries(3)
+    body = {"v": 1, "messages": sample}
+    assert json.dumps(body, separators=(",", ":")).encode("utf-8") == relay.encode_request(sample)
+
+
 def test_messages_go_out_in_requests_of_twenty():
     fake = FakeRelay()
-    outcomes = relay.send("https://push.hermie.dev", entries(45), post=fake, sleep=lambda s: None)
+    outcomes = run(entries(45), fake)
     assert [len(body["messages"]) for _, body in fake.requests] == [20, 20, 5]
     assert all(outcome.status == "sent" for outcome in outcomes)
     assert len(outcomes) == 45
+
+
+def test_one_handle_is_never_in_a_request_twice():
+    same = [
+        {"handle": "h_same", "secret": "one", "message": {}},
+        {"handle": "h_other", "secret": "s", "message": {}},
+        {"handle": "h_same", "secret": "two", "message": {}},
+    ]
+    fake = FakeRelay()
+    outcomes = run(same, fake)
+    assert [[m["secret"] for m in body["messages"]] for _, body in fake.requests] == [["one", "s"], ["two"]]
+    assert [outcome.status for outcome in outcomes] == ["sent", "sent", "sent"]
 
 
 def test_answers_are_matched_by_handle_not_by_position():
@@ -359,7 +445,7 @@ def test_answers_are_matched_by_handle_not_by_position():
         rows[0]["status"] = "gone"
         return relay.Reply(status=200, body={"results": list(reversed(rows))})
 
-    outcomes = relay.send("https://push.hermie.dev", entries(3), post=post, sleep=lambda s: None)
+    outcomes = run(entries(3), post)
     assert [outcome.status for outcome in outcomes] == ["gone", "sent", "sent"]
 
 
@@ -370,7 +456,7 @@ def test_a_message_the_relay_said_nothing_about_is_dropped_not_retried():
         calls.append(body)
         return relay.Reply(status=200, body={"results": []})
 
-    outcome, = relay.send("https://push.hermie.dev", entries(1), post=post, sleep=lambda s: None)
+    outcome, = run(entries(1), post)
     assert outcome.status == "rejected"
     assert len(calls) == 1
 
@@ -378,11 +464,11 @@ def test_a_message_the_relay_said_nothing_about_is_dropped_not_retried():
 @pytest.mark.parametrize("status", ["retry", "limited"])
 def test_retry_and_limited_are_tried_once_more_after_the_wait_asked_for(status):
     fake = FakeRelay({"h_0000": [status, "sent"]})
-    sleeps = []
-    outcomes = relay.send("https://push.hermie.dev", entries(2), post=fake, sleep=sleeps.append)
+    clock = Clock()
+    outcomes = run(entries(2), fake, clock)
 
     assert [outcome.status for outcome in outcomes] == ["sent", "sent"]
-    assert sleeps == [3]
+    assert clock.sleeps == [3]
     # Only the message that was not delivered is sent again.
     assert [[m["handle"] for m in body["messages"]] for _, body in fake.requests] == [
         ["h_0000", "h_0001"], ["h_0000"],
@@ -392,50 +478,146 @@ def test_retry_and_limited_are_tried_once_more_after_the_wait_asked_for(status):
 @pytest.mark.parametrize("status", ["retry", "limited"])
 def test_a_second_retry_is_dropped(status):
     fake = FakeRelay({"h_0000": status})
-    outcome, = relay.send("https://push.hermie.dev", entries(1), post=fake, sleep=lambda s: None)
+    outcome, = run(entries(1), fake)
     assert outcome.status == status
     assert len(fake.requests) == 2
 
 
-def test_the_wait_is_bounded():
+def answering_every_entry(status, retry_after):
+    calls = []
+
     def post(url, body):
+        calls.append(body)
         return relay.Reply(
             status=200,
-            body={"results": [{"handle": m["handle"], "status": "limited", "retryAfter": 3600} for m in body["messages"]]},
+            body={"results": [
+                {"handle": m["handle"], "status": status, "retryAfter": retry_after} for m in body["messages"]
+            ]},
         )
 
-    sleeps = []
-    relay.send("https://push.hermie.dev", entries(1), post=post, sleep=sleeps.append)
-    assert sleeps == [relay.MAX_RETRY_SECONDS]
+    return post, calls
+
+
+@pytest.mark.parametrize("status", ["retry", "limited"])
+def test_a_long_wait_is_not_waited_for(status):
+    """The sender's thread is shared by every notification after this one."""
+    post, calls = answering_every_entry(status, 3600)
+    clock = Clock()
+    outcome, = run(entries(1), post, clock)
+    assert outcome.status == status
+    assert clock.sleeps == []
+    assert len(calls) == 1
+
+
+def test_a_limited_handle_is_left_alone_until_its_time():
+    pacing = relay.Pacing()
+    clock = Clock()
+    post, calls = answering_every_entry("limited", 600)
+    run(entries(2), post, clock, pacing)
+
+    fake = FakeRelay()
+    outcomes = run(entries(3), fake, clock, pacing)
+    # The two limited handles are not asked about; the third one is.
+    assert [outcome.status for outcome in outcomes] == ["deferred", "deferred", "sent"]
+    assert [[m["handle"] for m in body["messages"]] for _, body in fake.requests] == [["h_0002"]]
+
+    clock.now += 601
+    fake = FakeRelay()
+    assert [o.status for o in run(entries(2), fake, clock, pacing)] == ["sent", "sent"]
 
 
 def test_a_network_failure_is_retried_once_then_dropped():
     fake = FakeRelay(fail_first=1)
-    outcome, = relay.send("https://push.hermie.dev", entries(1), post=fake, sleep=lambda s: None)
+    outcome, = run(entries(1), fake)
     assert outcome.status == "sent"
 
     fake = FakeRelay(fail_first=5)
-    outcome, = relay.send("https://push.hermie.dev", entries(1), post=fake, sleep=lambda s: None)
+    outcome, = run(entries(1), fake)
     assert outcome.status == "failed"
     assert len(fake.requests) == 2
 
 
-def test_a_relay_in_trouble_is_retried_once():
+def test_a_relay_in_trouble_is_retried_once_and_then_left_alone():
     fake = FakeRelay(status=503)
-    sleeps = []
-    outcome, = relay.send("https://push.hermie.dev", entries(1), post=fake, sleep=sleeps.append)
+    clock = Clock()
+    pacing = relay.Pacing()
+    outcome, = run(entries(1), fake, clock, pacing)
     assert outcome.status == "retry"
     assert len(fake.requests) == 2
-    assert sleeps == [7]
+    assert clock.sleeps == [7]
+
+    # The next notification does not knock at all while the relay rests...
+    outcome, = run(entries(1), fake, clock, pacing)
+    assert outcome.status == "deferred"
+    assert len(fake.requests) == 2
+    assert clock.sleeps == [7]
+
+    # ...and is sent once the rest is over.
+    clock.now += relay.BACKOFF_SECONDS
+    outcome, = run(entries(1), FakeRelay(), clock, pacing)
+    assert outcome.status == "sent"
 
 
-@pytest.mark.parametrize("status", [301, 302, 400, 401, 404, 413])
+def test_a_relay_that_asks_for_a_long_rest_is_not_waited_for():
+    def post(url, body):
+        return relay.Reply(status=429, retry_after=900)
+
+    clock = Clock()
+    pacing = relay.Pacing()
+    outcome, = run(entries(1), post, clock, pacing)
+    assert outcome.status == "retry"
+    assert clock.sleeps == []
+    assert pacing.origin_wait("https://push.hermie.dev", clock()) == 900
+
+
+def test_one_wait_at_most_per_delivery():
+    """Twenty-five entries over two requests, both asked to wait: one sleep."""
+    post, calls = answering_every_entry("retry", 5)
+    clock = Clock()
+    run(entries(25), post, clock)
+    assert clock.sleeps == [5]
+    assert len(calls) == 4
+
+
+def test_a_whole_request_failure_stops_the_rest_of_that_round():
+    calls = []
+
+    def post(url, body):
+        calls.append(body)
+        raise OSError("connection refused")
+
+    clock = Clock()
+    outcomes = run(entries(45), post, clock)
+    # One request per round, not three: the relay is not asked twice into the same wall.
+    assert len(calls) == 2
+    assert {outcome.status for outcome in outcomes} == {"failed"}
+
+
+@pytest.mark.parametrize("status", [301, 302, 401, 404])
 def test_a_refused_request_is_not_retried_and_retires_nobody(status):
     fake = FakeRelay(status=status)
-    outcome, = relay.send("https://push.hermie.dev", entries(1), post=fake, sleep=lambda s: None)
+    outcome, = run(entries(1), fake)
     assert outcome.status == "rejected"
     assert outcome.device_gone is False
     assert len(fake.requests) == 1
+
+
+@pytest.mark.parametrize("status", [400, 413])
+def test_a_request_refused_as_a_whole_costs_only_the_entry_that_did_it(status):
+    """One bad entry must not cost every other device its notification."""
+
+    def post(url, body):
+        handles = [m["handle"] for m in body["messages"]]
+        calls.append(handles)
+        if "h_0001" in handles:
+            return relay.Reply(status=status)
+        return relay.Reply(status=200, body={"results": [{"handle": h, "status": "sent"} for h in handles]})
+
+    calls = []
+    outcomes = run(entries(3), post)
+    assert [outcome.status for outcome in outcomes] == ["sent", "rejected", "sent"]
+    assert outcomes[1].reason == f"http-{status}"
+    assert calls == [["h_0000", "h_0001", "h_0002"], ["h_0000"], ["h_0001"], ["h_0002"]]
 
 
 @pytest.mark.parametrize(
@@ -449,6 +631,63 @@ def test_the_sender_posts_only_to_an_https_origin(origin):
 def test_a_batch_over_the_limit_is_refused_rather_than_silently_cut():
     with pytest.raises(ValueError):
         relay.send_batch("https://push.hermie.dev", entries(21), post=FakeRelay())
+
+
+def test_an_empty_collapse_id_or_thread_is_left_out():
+    parsed = registration_of("i1", relay_row())
+    entry = relay.message_for(parsed, {"type": "message", "bot": ""}, title="t", body="b")
+    assert "collapseId" not in entry["message"]
+    assert "thread" not in entry["message"]
+
+
+# -- the relay's own numbers -------------------------------------------------
+#
+# The relay's protocol v1 (its `src/server/push/protocol.ts` and the protocol
+# document beside it): 20 messages a request, an 8,192-byte request body, a
+# 3,584-byte message, a 64-byte collapse id, a 256-character thread, and at
+# most 200 characters of handle or secret. When the relay's source is checked
+# out and `HERMIE_RELAY_REPO` points at it, the numbers are read from there.
+
+RELAY_LIMITS = {
+    "MAX_MESSAGES_PER_REQUEST": 20,
+    "MAX_REQUEST_BYTES": 8 * 1024,
+    "MAX_MESSAGE_BYTES": 3_584,
+    "MAX_COLLAPSE_ID_BYTES": 64,
+}
+
+
+def test_the_limits_are_the_relays_with_a_margin():
+    from hermie_plugin.push import registrations
+
+    assert relay.MAX_BATCH == RELAY_LIMITS["MAX_MESSAGES_PER_REQUEST"]
+    assert relay.MAX_REQUEST_BYTES < RELAY_LIMITS["MAX_REQUEST_BYTES"]
+    assert relay.MAX_MESSAGE_BYTES <= RELAY_LIMITS["MAX_MESSAGE_BYTES"]
+    assert relay.MAX_COLLAPSE_ID_BYTES == RELAY_LIMITS["MAX_COLLAPSE_ID_BYTES"]
+    assert relay.MAX_THREAD_CHARS == 256
+    assert registrations.MAX_RELAY_FIELD == 200
+
+
+def test_the_limits_match_the_relays_source_when_it_is_here():
+    import os
+    import re
+    from pathlib import Path
+
+    root = os.environ.get("HERMIE_RELAY_REPO", "")
+    source = Path(root) / "src" / "server" / "push" / "protocol.ts" if root else None
+    if source is None or not source.is_file():
+        pytest.skip("the relay's source is not checked out here")
+    text = source.read_text(encoding="utf-8")
+
+    def constant(name):
+        found = re.search(rf"export const {name} = ([0-9_ *]+);", text)
+        assert found, name
+        return eval(found.group(1).replace("_", ""), {})  # digits, `*` and spaces only
+
+    for name, value in RELAY_LIMITS.items():
+        assert constant(name) == value, name
+    assert re.search(r"handle: z\.string\(\)\.max\(200\)", text)
+    assert re.search(r"secret: z\.string\(\)\.max\(200\)", text)
+    assert re.search(r"thread: z\.string\(\)\.min\(1\)\.max\(256\)", text)
 
 
 # -- what each answer does to a registration ---------------------------------
@@ -675,3 +914,24 @@ def test_only_an_environment_proxy_is_used(monkeypatch):
     assert relay._proxies() == {}
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
     assert relay._proxies() == {"https": "http://proxy.example:3128"}
+
+
+def test_the_same_handle_with_another_secret_is_asked_about_separately(tmp_path, monkeypatch):
+    _, module = gateway(tmp_path, monkeypatch, {"i1": relay_row(), "i2": relay_row(secret="stale-secret")})
+    fake = FakeRelay({HANDLE: "sent"})
+    wired(monkeypatch, fake)
+    assert module.deliver(approval()) == 2
+    assert [[m["secret"] for m in body["messages"]] for _, body in fake.requests] == [[SECRET], ["stale-secret"]]
+
+
+def test_reports_about_rows_are_capped(tmp_path, monkeypatch, caplog):
+    """A co-user writing a new origin into a row on every turn cannot grow the log without bound."""
+    rows = {f"i{index}": relay_row(handle=f"h_{index:04d}", relay=f"https://r{index}.example") for index in range(100)}
+    _, module = gateway(tmp_path, monkeypatch, rows)
+    wired(monkeypatch, FakeRelay())
+    with caplog.at_level(logging.WARNING):
+        module.deliver(approval())
+    reports = [record for record in caplog.records if "allow-list" in record.getMessage()]
+    assert len(reports) == push_pkg.MAX_REPORTS
+    # Row-supplied text is quoted in the log, never written out raw.
+    assert "'https://r0.example'" in reports[0].getMessage()

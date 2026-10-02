@@ -11,11 +11,15 @@ people.
 - **`push.relay`: notifications reach the native Apple apps through a push relay.** A device running the
   native Hermie app on an iPhone, iPad or Mac registers with a relay and writes a row with
   `transport: relay`, its `handle` there and a `secret` that can send to that one device. This gateway
-  now delivers to such rows by posting to the relay, twenty messages a request, beside Expo and Web
-  Push, which are unchanged. A `gone` answer retires the row the way Expo's `DeviceNotRegistered`
-  does; `retry` and `limited` are tried once more after the wait the relay asked for (at most 30
-  seconds), and then dropped. Mutes, per-chat switches, the 90-second `seen` window and the 24-hour
-  dedupe apply exactly as they do to every other transport.
+  now delivers to such rows by posting to the relay beside Expo and Web Push, which are unchanged.
+  Requests stay inside the relay's own limits — at most twenty messages and 7.5 KB each, one handle
+  once — and a request the relay refuses as a whole (400, 413) is sent again one message at a time,
+  so a bad row costs only itself. A `gone` answer retires the row the way Expo's
+  `DeviceNotRegistered` does. `retry` and `limited` are tried once more after the wait the relay
+  asked for, unless it asked for more than 30 seconds; a relay that failed twice, or a handle over
+  its limit, is then left alone until its time, without a request. The sender thread waits at most
+  once per relay per notification. Mutes, per-chat switches, the 90-second `seen` window and the
+  24-hour dedupe apply exactly as they do to every other transport.
 - **The gateway posts only to relays on its own allow-list.** `push.relay_origins` defaults to exactly
   `https://push.hermie.dev`; an operator who runs their own relay names it there, which replaces the
   default. A row naming any other origin is not sent to, and is reported once in the log — a row is

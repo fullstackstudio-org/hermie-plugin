@@ -28,6 +28,11 @@ NAME = "push"
 
 QUEUE_SIZE = 256
 
+# How many distinct "not served" reports one process makes. A row is input, and
+# a co-user writing a new origin into one on every turn must not be able to grow
+# this set, or the log, without bound.
+MAX_REPORTS = 64
+
 
 class PushModule:
     """One instance per loaded plugin, holding the sender thread and the settings."""
@@ -43,6 +48,8 @@ class PushModule:
         # setting that is not an origin — so it costs one log line per process
         # rather than one per notification.
         self._reported: Set[str] = set()
+        # When each relay, and each handle on it, may be asked again.
+        self._relay_pacing = relay.Pacing()
 
     # -- settings ------------------------------------------------------------
     #
@@ -99,7 +106,7 @@ class PushModule:
         return allowed
 
     def _report_once(self, marker: str, message: str, *args: Any) -> None:
-        if marker in self._reported:
+        if marker in self._reported or len(self._reported) >= MAX_REPORTS:
             return
         self._reported.add(marker)
         logger.warning(message, *args)
@@ -280,7 +287,7 @@ class PushModule:
         # origin -> [(installation id, message)], so each relay gets its own
         # requests and each answer can be traced back to the row it retires.
         relay_batches: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-        relay_handles: Set[Tuple[str, str]] = set()
+        relay_seen: Set[Tuple[str, str, str]] = set()
         sent = 0
 
         for registration, preview in targets:
@@ -297,16 +304,20 @@ class PushModule:
                     # address of their choosing, with a body it composed.
                     self._report_once(
                         f"row:{registration.relay}",
-                        "hermie: a registration names relay %s, which is not on this gateway's "
+                        "hermie: a registration names relay %r, which is not on this gateway's "
                         "allow-list (push.relay_origins); not sending to it",
                         registration.relay,
                     )
                     continue
-                marker = (registration.relay, registration.handle or "")
-                if marker in relay_handles:
-                    # One handle is one device; two rows naming it are one buzz.
+                # Two rows with the same handle AND secret are one device written
+                # twice: one buzz. The same handle with another secret is a
+                # different claim (one of them stale or wrong), and the relay is
+                # the one that can tell which — `plan_requests` keeps the two in
+                # separate requests, because answers are matched by handle.
+                marker = (registration.relay, registration.handle or "", registration.secret or "")
+                if marker in relay_seen:
                     continue
-                relay_handles.add(marker)
+                relay_seen.add(marker)
                 entry = relay.message_for(registration, payload, title=title, body=body, gateway_key=key)
                 if relay.too_large(entry):
                     logger.warning(
@@ -356,7 +367,7 @@ class PushModule:
 
     def _send_relay(self, origin: str, entries: List[Tuple[str, Dict[str, Any]]]) -> int:
         try:
-            outcomes = relay.send(origin, [entry for _, entry in entries])
+            outcomes = relay.send(origin, [entry for _, entry in entries], pacing=self._relay_pacing)
         except Exception as exc:
             logger.warning("hermie: relay delivery to %s failed: %s", origin, type(exc).__name__)
             return 0
@@ -368,6 +379,10 @@ class PushModule:
             elif outcome.device_gone:
                 logger.info("hermie: relay says %s (%s) is gone; retiring it", installation_id, hint)
                 self.runtime.state.retire(installation_id, "relay-gone")
+            elif outcome.status == relay.DEFERRED:
+                # Asked to wait and dropped without a request; said quietly,
+                # because during an outage it is said about every notification.
+                logger.info("hermie: not sent to %s (%s): %s", installation_id, hint, outcome.reason)
             else:
                 logger.warning(
                     "hermie: relay did not deliver to %s (%s): %s %s",
