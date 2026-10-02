@@ -402,7 +402,9 @@ def recipients(
         if retired(registration.installation_id, registration.updated_at):
             continue
         # The gateway's policy is a ceiling, never a floor: `never` overrides a
-        # device that asked for previews, and `device` never turns one on.
-        preview = gateway_preview == "device" and registration.preview
+        # device that asked for previews, and `device` never turns one on. Above
+        # both sits the transport: text never crosses the relay in the clear,
+        # so a relay row's own `preview: true` is not an answer it can give.
+        preview = gateway_preview == "device" and registration.preview and registration.may_preview
         out.append((registration, preview))
     return out

@@ -236,3 +236,40 @@ def test_web_push_carries_the_payload_where_the_service_worker_reads_it(tmp_path
     assert sent[0]["data"]["type"] == "request"
     assert sent[0]["data"]["requestId"] == "r1"
     assert conformance_problems(sent[0]["data"]) == []
+
+
+# -- the relay ---------------------------------------------------------------
+
+
+def relay_entry(note):
+    from hermie_plugin.push import relay
+    from hermie_plugin.push.registrations import registration_of
+
+    row = registration_of(
+        "i1",
+        {
+            "v": 1, "transport": "relay", "relay": "https://push.hermie.dev", "handle": "h_1",
+            "secret": "s", "platform": "ios", "types": {}, "preview": True, "updatedAt": 1,
+        },
+    )
+    payload = note.payload(preview=row.may_preview, gateway_key="bf796761db84e312", session_kind="canonical")
+    title, body = note.rendered(preview=row.may_preview)
+    return relay.message_for(row, payload, title=title, body=body, gateway_key="bf796761db84e312")
+
+
+@pytest.mark.parametrize("name", sorted(every_notification()))
+def test_every_relay_message_carries_a_conforming_data_bag_and_no_text(name):
+    note = every_notification()[name]
+    message = relay_entry(note)["message"]
+    assert conformance_problems(message["data"], allow_missing=KNOWN_GAPS.get(name, ())) == []
+    assert "preview" not in message["data"]
+    assert (message["title"], message["body"]) == (note.title, note.body)
+
+
+def test_the_relay_is_told_the_contracts_category_for_an_approval_only():
+    for name, note in every_notification().items():
+        message = relay_entry(note)["message"]
+        if name == "approval":
+            assert message["category"] == CONTRACT["category"]["id"]
+        else:
+            assert "category" not in message, name

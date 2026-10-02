@@ -22,6 +22,23 @@ which is what a notification puts on the wire so a device with several gateways
 can tell which one buzzed.
 
 The plugin reads these keys and never writes them.
+
+There are three transports, and a row is exactly one of them:
+
+- ``expo`` — ``token``, an Expo push token;
+- ``webpush`` — ``endpoint`` plus ``keys.p256dh`` and ``keys.auth``, a browser's
+  subscription;
+- ``relay`` — ``relay``, ``handle`` and ``secret``: a device that registered
+  with a push relay and was handed a send capability for itself alone. Only
+  ``ios`` and ``macos`` register there. ``relay`` names the relay the device
+  chose, and it is checked twice: here that it is an https origin at all, and
+  by the sender against its own allow-list, because a row is somebody else's
+  input and the sender must never post wherever a row says. A row may also
+  carry ``enc``, the key a later step uses to encrypt the notification for the
+  device; it is carried but not used yet, so a relay row is never sent text.
+
+A row carrying the fields of two transports is a confusion, never a choice,
+and is dropped whichever transport it claims.
 """
 
 from __future__ import annotations
@@ -29,9 +46,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .gateway_key import is_gateway_key
+from urllib.parse import urlsplit
+
+from .gateway_key import is_gateway_key, origin_of
 
 SECTION_VERSION = 1
+
+# The platforms a relay registration can come from: the relay delivers through
+# Apple's push service, and only Apple's platforms have a device there.
+RELAY_PLATFORMS = ("ios", "macos")
+
+# Generous for a handle and a 32-byte secret in base64url, and a bound all the
+# same: a row is input, and a field this long is not a credential anybody issued.
+MAX_RELAY_FIELD = 512
 
 # Every event a device can ask about, and every one it can be sent — ONE list,
 # which `push/events.py` re-exports as `TYPES`. They were two tuples once, and
@@ -62,7 +89,7 @@ PUSH_TYPES = (
 @dataclass(frozen=True)
 class Registration:
     installation_id: str
-    transport: str  # "expo" | "webpush"
+    transport: str  # "expo" | "webpush" | "relay"
     platform: str
     types: Dict[str, bool]
     preview: bool
@@ -77,6 +104,28 @@ class Registration:
     # itself computed it. Empty for a row written before the app carried one,
     # and for a row whose claim is not the shape a key has. See `gateway_key`.
     gateway_key: str = ""
+    # A relay row: the relay's origin as the row named it (checked to be an
+    # https origin, NOT yet against any allow-list), the device's handle there,
+    # and the capability to send to that one handle. The secret is kept out of
+    # `repr`, so a registration that ends up in a log line does not take it along.
+    relay: str = ""
+    handle: Optional[str] = None
+    secret: Optional[str] = field(default=None, repr=False)
+    # The device's notification key, for the encrypted step. Carried as the row
+    # wrote it; nothing reads it yet.
+    enc: Dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def may_preview(self) -> bool:
+        """Whether this device's copy may ever carry message text.
+
+        Never through the relay. Text is only allowed to cross a relay
+        encrypted end to end, to a key only the device holds, and that is a
+        later step: until it ships, a relay row is sent the bot and the kind of
+        event, whatever its own `preview` says — including a row that already
+        carries an `enc` key. The other transports keep the device's answer.
+        """
+        return self.transport != "relay"
 
     def wants(self, push_type: str) -> bool:
         """Whether this device asked about *push_type*, before any chat's say.
@@ -283,6 +332,37 @@ def effective_types(types: Dict[str, bool], overrides: Optional[Dict[str, bool]]
     return merged
 
 
+def relay_origin(value: Any) -> str:
+    """``https://host[:port]``, lowercased, when *value* is exactly an origin.
+
+    Stricter than :func:`gateway_key.origin_of` on purpose. That one answers
+    "which gateway is this address on" and so forgives a path; this one answers
+    "where may a notification be posted", and an address with a path, a query,
+    a fragment or a user name in it is not the origin of anything — it is a
+    request to post somewhere else. https only: a relay request carries a send
+    capability, and that never travels in the clear.
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return ""
+    if (parts.scheme or "").lower() != "https":
+        return ""
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        return ""
+    if parts.path not in ("", "/") or parts.query or parts.fragment or text.endswith(("?", "#")):
+        return ""
+    return origin_of(text)
+
+
+def _relay_field(value: Any) -> str:
+    text = _text(value)
+    return text if 0 < len(text) <= MAX_RELAY_FIELD and text == text.strip() else ""
+
+
 def registration_of(installation_id: str, value: Any, user_id: str = "") -> Optional[Registration]:
     """One registration, or nothing."""
     if not installation_id or not isinstance(value, dict):
@@ -296,6 +376,9 @@ def registration_of(installation_id: str, value: Any, user_id: str = "") -> Opti
     raw_keys = value.get("keys") if isinstance(value.get("keys"), dict) else {}
     p256dh = _text(raw_keys.get("p256dh"))
     auth = _text(raw_keys.get("auth"))
+    # Present-ness, not validity: a row that carries a handle at all is a relay
+    # row, and an Expo row that also carries one is a confusion either way.
+    has_handle = value.get("handle") is not None
 
     common = {
         "installation_id": installation_id,
@@ -311,14 +394,49 @@ def registration_of(installation_id: str, value: Any, user_id: str = "") -> Opti
     }
 
     if transport == "expo":
-        return Registration(transport="expo", token=token, **common) if token and not endpoint else None
+        if token and not endpoint and not has_handle:
+            return Registration(transport="expo", token=token, **common)
+        return None
     if transport == "webpush":
-        if endpoint and p256dh and auth and not token:
+        if endpoint and p256dh and auth and not token and not has_handle:
             return Registration(
                 transport="webpush", endpoint=endpoint, keys={"p256dh": p256dh, "auth": auth}, **common
             )
         return None
+    if transport == "relay":
+        return _relay_registration(value, token=token, endpoint=endpoint, common=common)
     return None
+
+
+def _relay_registration(
+    value: Dict[str, Any], *, token: str, endpoint: str, common: Dict[str, Any]
+) -> Optional[Registration]:
+    """A relay row, or nothing.
+
+    Every check here is about the row's own shape. Whether THIS gateway will
+    post to the relay it names is the sender's question, asked against the
+    sender's allow-list (see `push/relay.py`): a reader that answered it would
+    need the gateway's configuration, and a row that names an unknown relay is
+    still a well-formed row that a differently configured sender may serve.
+    """
+    if token or endpoint or value.get("token") is not None:
+        return None
+    if common["platform"] not in RELAY_PLATFORMS:
+        return None
+    relay = relay_origin(value.get("relay"))
+    handle = _relay_field(value.get("handle"))
+    secret = _relay_field(value.get("secret"))
+    if not (relay and handle and secret):
+        return None
+    raw_enc = value.get("enc")
+    return Registration(
+        transport="relay",
+        relay=relay,
+        handle=handle,
+        secret=secret,
+        enc=dict(raw_enc) if isinstance(raw_enc, dict) else {},
+        **common,
+    )
 
 
 def read_section(app_key_value: Any, user_id: str = "") -> Section:

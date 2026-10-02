@@ -105,6 +105,13 @@ config_schema:
       name it in a notification payload. Empty falls back to Hermes' own
       dashboard.public_url. Only consulted for a device that registered before
       the app started writing the key itself.
+  push.relay_origins:
+    type: list
+    default: ["https://push.hermie.dev"]
+    description: >-
+      The push relays this gateway may post to, as https origins. A device
+      registered with any other relay is not sent to. Setting this replaces
+      the default; an empty list serves no relay at all.
   push.vapid_key_path:
     type: str
     default: ""

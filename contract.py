@@ -37,9 +37,11 @@ read for one more version. The readers are ``push/registrations.py`` and
         registrations:
           <installation id>:
             v: 1
-            transport: expo         # or "webpush"
+            transport: expo         # or "webpush", or "relay"
             token: "..."            # expo only
             endpoint: "..."         # webpush only, with keys.p256dh + keys.auth
+            relay: "https://..."    # relay only, with handle + secret (and enc,
+                                    # carried for the encrypted step); ios/macos
             platform: ios
             types: {message: true, request: true, cron: true,
                     cron_done: true, cron_failed: true,
@@ -111,6 +113,10 @@ MIN_APP_VERSION = "1.0.0"
 # that only reads a number suppresses nothing. Both are questions the app must
 # be able to ask before it writes, which is what a capability string is for.
 CAP_PUSH_EXPO = "push.expo"
+# Rows with `transport: relay` are served: this gateway posts to a push relay on
+# its own allow-list, which is how a native Apple app is reached. An app that
+# does not see it keeps its Expo row, and keeps being reached through Expo.
+CAP_PUSH_RELAY = "push.relay"
 CAP_PUSH_WEBPUSH = "push.webpush"
 CAP_PUSH_PREVIEW = "push.preview"
 CAP_PUSH_MUTE = "push.mute"

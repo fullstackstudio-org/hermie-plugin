@@ -15,11 +15,11 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .. import contract
 from . import cron as cron_signal
-from . import events, expo, gateway_key, sessions, webpush
+from . import events, expo, gateway_key, relay, sessions, webpush
 from .registrations import Section, read_sections
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,10 @@ class PushModule:
         self.lock = threading.Lock()
         self._vapid_key = None
         self._gateway_key: Optional[str] = None
+        # What has already been reported as not served — a relay a row names, a
+        # setting that is not an origin — so it costs one log line per process
+        # rather than one per notification.
+        self._reported: Set[str] = set()
 
     # -- settings ------------------------------------------------------------
     #
@@ -74,6 +78,31 @@ class PushModule:
         against. See `gateway_key.py` for why that order is the safe one.
         """
         return str(self.runtime.config("push.public_url", "") or "")
+
+    @property
+    def relay_origins(self) -> Tuple[str, ...]:
+        """The relays this gateway will post to, and nothing else.
+
+        `push.relay_origins` replaces the default rather than adding to it: an
+        operator who runs their own relay may want only theirs. An entry that is
+        not exactly an https origin is refused, once, in the log.
+        """
+        allowed, refused = relay.allowed_origins(
+            self.runtime.config("push.relay_origins", [relay.DEFAULT_ORIGIN])
+        )
+        for item in refused:
+            self._report_once(
+                f"setting:{item}",
+                "hermie: push.relay_origins entry %r is not an https origin; ignoring it",
+                item,
+            )
+        return allowed
+
+    def _report_once(self, marker: str, message: str, *args: Any) -> None:
+        if marker in self._reported:
+            return
+        self._reported.add(marker)
+        logger.warning(message, *args)
 
     def fallback_gateway_key(self) -> str:
         """The configured key, worked out once and remembered.
@@ -117,6 +146,11 @@ class PushModule:
             found.append(contract.CAP_PUSH_SESSION_KIND)
         if webpush.available():
             found.append(contract.CAP_PUSH_WEBPUSH)
+        # The relay is claimed whenever there is a relay to post to. An operator
+        # who emptied the allow-list has said this gateway serves none, and a
+        # device that registered there anyway would hear nothing.
+        if self.relay_origins:
+            found.append(contract.CAP_PUSH_RELAY)
         if self.gateway_preview == "device":
             found.append(contract.CAP_PUSH_PREVIEW)
         if "turn_done" in self.enabled_types:
@@ -239,18 +273,49 @@ class PushModule:
         # is the address THAT device registered against.
         session_kind = self.session_kind(notification)
         fallback_key = self.fallback_gateway_key()
+        relay_origins = self.relay_origins
 
         expo_batch: List[Dict[str, Any]] = []
         expo_owners: List[str] = []
+        # origin -> [(installation id, message)], so each relay gets its own
+        # requests and each answer can be traced back to the row it retires.
+        relay_batches: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+        relay_handles: Set[Tuple[str, str]] = set()
         sent = 0
 
         for registration, preview in targets:
+            # `recipients` already refused text to a relay row; asked again here
+            # because this is the last decision before the wire.
+            preview = preview and registration.may_preview
             title, body = notification.rendered(preview=preview)
-            payload = notification.payload(
-                preview=preview,
-                gateway_key=gateway_key.key_for(registration.gateway_key, fallback_key),
-                session_kind=session_kind,
-            )
+            key = gateway_key.key_for(registration.gateway_key, fallback_key)
+            payload = notification.payload(preview=preview, gateway_key=key, session_kind=session_kind)
+            if registration.transport == "relay":
+                if registration.relay not in relay_origins:
+                    # A row is input. Posting wherever it points would let
+                    # anybody who can write a row aim this gateway at an
+                    # address of their choosing, with a body it composed.
+                    self._report_once(
+                        f"row:{registration.relay}",
+                        "hermie: a registration names relay %s, which is not on this gateway's "
+                        "allow-list (push.relay_origins); not sending to it",
+                        registration.relay,
+                    )
+                    continue
+                marker = (registration.relay, registration.handle or "")
+                if marker in relay_handles:
+                    # One handle is one device; two rows naming it are one buzz.
+                    continue
+                relay_handles.add(marker)
+                entry = relay.message_for(registration, payload, title=title, body=body, gateway_key=key)
+                if relay.too_large(entry):
+                    logger.warning(
+                        "hermie: a %s notification for %s is over the relay's size limit; skipping",
+                        notification.type, registration.installation_id,
+                    )
+                    continue
+                relay_batches.setdefault(registration.relay, []).append((registration.installation_id, entry))
+                continue
             if registration.transport == "expo":
                 if not expo.is_expo_token(registration.token or ""):
                     logger.warning(
@@ -260,11 +325,13 @@ class PushModule:
                     continue
                 expo_batch.append(expo.message_for(registration.token or "", payload, title=title, body=body))
                 expo_owners.append(registration.installation_id)
-            else:
+            elif registration.transport == "webpush":
                 sent += self._send_webpush(registration, payload, title, body)
 
         if expo_batch:
             sent += self._send_expo(expo_batch, expo_owners)
+        for origin, entries in relay_batches.items():
+            sent += self._send_relay(origin, entries)
 
         state.save()
         return sent
@@ -285,6 +352,27 @@ class PushModule:
                         "hermie: expo refused a message for %s: %s %s",
                         installation_id, ticket.error or "?", ticket.message,
                     )
+        return sent
+
+    def _send_relay(self, origin: str, entries: List[Tuple[str, Dict[str, Any]]]) -> int:
+        try:
+            outcomes = relay.send(origin, [entry for _, entry in entries])
+        except Exception as exc:
+            logger.warning("hermie: relay delivery to %s failed: %s", origin, type(exc).__name__)
+            return 0
+        sent = 0
+        for (installation_id, entry), outcome in zip(entries, outcomes):
+            hint = relay.handle_hint(entry.get("handle"))
+            if outcome.status == relay.SENT:
+                sent += 1
+            elif outcome.device_gone:
+                logger.info("hermie: relay says %s (%s) is gone; retiring it", installation_id, hint)
+                self.runtime.state.retire(installation_id, "relay-gone")
+            else:
+                logger.warning(
+                    "hermie: relay did not deliver to %s (%s): %s %s",
+                    installation_id, hint, outcome.status, outcome.reason,
+                )
         return sent
 
     def vapid_key(self):
