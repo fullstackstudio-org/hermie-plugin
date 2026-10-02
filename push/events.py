@@ -300,8 +300,14 @@ def from_session_end(
 
 
 def _cron_body(cron: Optional["Cron"], fallback: str) -> str:
-    """The lock-screen line. A job id is a name the person chose, so it is shown."""
-    return f"{fallback}: {cron.job_id}" if cron is not None and cron.job_id else fallback
+    """The lock-screen line, which names the kind of event and never the job.
+
+    The job id rides in the payload as `jobId`, where the app can resolve it,
+    and the push contract says it is carried, never shown: it is a name the
+    person chose, and a lock screen — or a relay passing the line on — has no
+    business displaying it. It was appended here once.
+    """
+    return fallback
 
 
 def _cron_extra(cron: Optional["Cron"]) -> Dict[str, Any]:

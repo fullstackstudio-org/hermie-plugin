@@ -30,6 +30,10 @@ people.
 
 ### Fixed
 
+- **A scheduled job's id is no longer shown on the lock screen.** It was appended to the body of
+  every cron notification ("A scheduled job failed: <job>") on every transport. The push contract
+  says `jobId` is carried, never shown: it still rides in the payload, and the body now names only
+  the kind of event.
 - **An approval arrives with its Allow and Deny buttons again.** Expo messages were posted under the
   bare type (`request`) as their category, which no app ever registered, so the buttons never
   appeared. An approval that names its request is now posted under `hermie.request`, the category

@@ -108,7 +108,9 @@ def test_a_delivery_carries_the_job_id_and_says_the_signal_was_a_fact():
     )
 
     assert found.type == "cron"
-    assert "nightly-report" in found.body
+    # Carried, never shown: the contract's rule for `jobId`.
+    assert "nightly-report" not in found.body
+    assert "nightly-report" not in found.title
     payload = found.payload(preview=False)
     assert payload["cron"] is True and payload["cronCertain"] is True
     assert payload["jobId"] == "nightly-report"
@@ -132,7 +134,8 @@ def test_a_declared_failure_is_delivered_as_a_failure():
     )
 
     assert found.type == "cron_failed"
-    assert "nightly-report" in found.body
+    assert "nightly-report" not in found.body
+    assert found.body == "A scheduled job failed"
 
 
 def test_a_cron_turn_ending_well_is_its_own_type():

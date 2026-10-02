@@ -273,3 +273,13 @@ def test_the_relay_is_told_the_contracts_category_for_an_approval_only():
             assert message["category"] == CONTRACT["category"]["id"]
         else:
             assert "category" not in message, name
+
+
+@pytest.mark.parametrize("name", ["cron", "cron_done", "cron_failed", "approval"])
+def test_a_job_id_is_carried_and_never_shown(name):
+    """The contract: `jobId` is carried, never shown — on any transport."""
+    note = every_notification()[name]
+    assert full_payload(note)["jobId"] == "nightly"
+    for preview in (False, True):
+        title, body = note.rendered(preview=preview)
+        assert "nightly" not in title and "nightly" not in body
