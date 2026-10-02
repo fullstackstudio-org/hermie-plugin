@@ -252,8 +252,9 @@ def wired(monkeypatch, fake, clock=None):
     clock = clock or Clock()
     monkeypatch.setattr(
         push_pkg.relay, "send",
-        lambda origin, entries, **options: REAL_SEND(
-            origin, entries, post=fake, sleep=clock.sleep, clock=clock, **options
+        lambda origin, entries, clock_from_module=None, **options: REAL_SEND(
+            origin, entries, post=fake, sleep=clock.sleep, clock=clock,
+            **{key: value for key, value in options.items() if key != "clock"},
         ),
     )
     return clock
@@ -790,14 +791,93 @@ def test_gone_retires_the_row_like_expo_does(tmp_path, monkeypatch):
     assert len(fake.requests) == 1
 
 
+def rewrite_rows(home, rows):
+    path = home / "profile.yaml"
+    document = yaml.safe_load(path.read_text())
+    document["ui_meta"]["hermie-app:u1"]["push"]["registrations"] = rows
+    path.write_text(yaml.safe_dump(document))
+
+
 def test_a_fresh_registration_after_retirement_is_served_again(tmp_path, monkeypatch):
-    _, module = gateway(tmp_path, monkeypatch, {"i1": relay_row()})
+    home, module = gateway(tmp_path, monkeypatch, {"i1": relay_row()})
     wired(monkeypatch, FakeRelay({HANDLE: "gone"}))
     module.deliver(approval("r1"))
 
-    module.runtime.state.data["retired"]["i1"]["at"] = 1789957143 - 1
+    # The device registered again: a new handle and secret, a newer row.
+    rewrite_rows(home, {"i1": relay_row(handle="h_new_handle_after_gone", secret="new-secret", updatedAt=1899999999)})
     wired(monkeypatch, FakeRelay())
     assert module.deliver(approval("r2")) == 1
+
+
+def test_a_pair_that_came_back_gone_is_not_sent_again_when_rewritten(tmp_path, monkeypatch):
+    """A relay never hands a handle out twice; re-arming the same pair changes nothing."""
+    home, module = gateway(tmp_path, monkeypatch, {"i1": relay_row()})
+    wired(monkeypatch, FakeRelay({HANDLE: "gone"}))
+    module.deliver(approval("r1"))
+
+    rewrite_rows(home, {"i9": relay_row(updatedAt=1899999999)})  # same pair, new id, newer row
+    fake = FakeRelay()
+    wired(monkeypatch, fake)
+    assert module.deliver(approval("r2")) == 0
+    assert fake.requests == []
+
+
+def test_a_users_gone_budget_stops_their_unproven_rows_for_an_hour(tmp_path, monkeypatch, caplog):
+    """A co-user's made-up rows must not spend the gateway's auth-failure allowance at the relay."""
+    proven = relay_row(handle="h_proven_device_0001", secret="proven")
+    home, module = gateway(tmp_path, monkeypatch, {"good": proven})
+    now = [5_000.0]
+    module._clock = lambda: now[0]
+    wired(monkeypatch, FakeRelay())
+    assert module.deliver(approval("r0")) == 1  # the real device is proven
+
+    fake = FakeRelay({f"h_fake_{i:04d}": "gone" for i in range(10)})
+    wired(monkeypatch, fake)
+    for round_ in range(3):
+        rewrite_rows(home, {
+            "good": proven,
+            f"bad{round_}": relay_row(handle=f"h_fake_{round_:04d}", secret="made-up", updatedAt=1899999999),
+        })
+        module.deliver(approval(f"r{round_ + 1}"))
+
+    # Three gone answers in the hour: the next made-up row is not sent; the proven one still is.
+    rewrite_rows(home, {
+        "good": proven,
+        "bad9": relay_row(handle="h_fake_0009", secret="made-up", updatedAt=1899999999),
+    })
+    fake.requests.clear()
+    with caplog.at_level(logging.WARNING):
+        assert module.deliver(approval("r9")) == 1
+    assert [m["handle"] for _, body in fake.requests for m in body["messages"]] == ["h_proven_device_0001"]
+    assert any("keep coming back gone" in r.getMessage() for r in caplog.records)
+
+    # After the hour, that user's new rows are tried again.
+    now[0] += relay.GONE_WINDOW_SECONDS
+    fake.requests.clear()
+    module.deliver(approval("r10"))
+    assert "h_fake_0009" in [m["handle"] for _, body in fake.requests for m in body["messages"]]
+
+
+def test_one_users_budget_does_not_touch_another_users_rows(tmp_path, monkeypatch):
+    trust = relay.Trust()
+    gone = relay.Outcome(status="gone")
+    for index in range(relay.GONE_BUDGET):
+        trust.record(("o", f"h{index}", "s"), "mallory", gone, 100.0)
+    assert trust.over_budget("mallory", 101.0) is True
+    assert trust.over_budget("alice", 101.0) is False
+    assert trust.over_budget("mallory", 100.0 + relay.GONE_WINDOW_SECONDS) is False
+
+
+def test_the_remembered_pairs_are_bounded():
+    trust = relay.Trust()
+    gone = relay.Outcome(status="gone")
+    for index in range(relay.MAX_REMEMBERED_PAIRS + 50):
+        trust.record(("o", f"h{index}", "s"), f"u{index}", gone, float(index))
+    assert len(trust.gone) == relay.MAX_REMEMBERED_PAIRS
+    assert len(trust.failures) <= relay.MAX_REMEMBERED_PAIRS
+    # The soonest to lapse went first: the oldest pairs.
+    assert ("o", "h0", "s") not in trust.gone
+    assert ("o", f"h{relay.MAX_REMEMBERED_PAIRS + 49}", "s") in trust.gone
 
 
 def test_rejected_is_logged_and_retires_nobody(tmp_path, monkeypatch, caplog):

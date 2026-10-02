@@ -29,6 +29,12 @@ people.
   address of their choosing. Requests go over https only, follow no redirect, use a proxy only when
   one is set in the environment, and time out after ten seconds. Neither the send secret nor a whole
   handle is ever logged.
+- **One person's bad relay rows cannot spend everybody's allowance.** The relay counts `gone`
+  answers — an unknown handle, a wrong secret — against the gateway that asked. After three in an
+  hour for one person's rows, that person's rows that have never been delivered to are not sent
+  until the hour has passed; rows that have been delivered to keep being served, and nobody else's
+  rows are touched. A handle and secret the relay called `gone` are remembered and not sent again,
+  even when a row is written again with them.
 - **The advert says which relays this gateway posts to.** `relayOrigins` lists the allow-list,
   so an app can check its own relay before it moves a device onto a relay row. `push.relay` itself
   is claimed only while `https://push.hermie.dev` — the relay the Hermie apps register with — is on

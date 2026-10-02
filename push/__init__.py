@@ -48,8 +48,12 @@ class PushModule:
         # setting that is not an origin — so it costs one log line per process
         # rather than one per notification.
         self._reported: Set[str] = set()
-        # When each relay, and each handle on it, may be asked again.
+        # When each relay, and each handle on it, may be asked again; and what
+        # the relay has said about rows (see `relay.Trust`). Both run on a
+        # clock that does not jump when the wall clock does.
         self._relay_pacing = relay.Pacing()
+        self._relay_trust = relay.Trust()
+        self._clock = time.monotonic
 
     # -- settings ------------------------------------------------------------
     #
@@ -298,7 +302,8 @@ class PushModule:
         expo_owners: List[str] = []
         # origin -> [(installation id, message)], so each relay gets its own
         # requests and each answer can be traced back to the row it retires.
-        relay_batches: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+        relay_batches: Dict[str, List[Tuple[str, str, relay.Pair, Dict[str, Any]]]] = {}
+        trusted_at = self._clock()
         relay_seen: Set[Tuple[str, str, str]] = set()
         sent = 0
 
@@ -331,6 +336,20 @@ class PushModule:
                 if marker in relay_seen:
                     continue
                 relay_seen.add(marker)
+                if self._relay_trust.is_gone(marker, trusted_at):
+                    # The relay already said this pair is gone; a row written
+                    # again with it will not be answered differently.
+                    continue
+                if not self._relay_trust.is_proven(marker, trusted_at) and self._relay_trust.over_budget(
+                    registration.user_id, trusted_at
+                ):
+                    self._report_once(
+                        f"budget:{registration.user_id}",
+                        "hermie: relay rows of user %r keep coming back gone; their unproven rows are "
+                        "not sent for up to an hour",
+                        registration.user_id,
+                    )
+                    continue
                 entry = relay.message_for(registration, payload, title=title, body=body, gateway_key=key)
                 if relay.too_large(entry):
                     logger.warning(
@@ -338,7 +357,9 @@ class PushModule:
                         notification.type, registration.installation_id,
                     )
                     continue
-                relay_batches.setdefault(registration.relay, []).append((registration.installation_id, entry))
+                relay_batches.setdefault(registration.relay, []).append(
+                    (registration.installation_id, registration.user_id, marker, entry)
+                )
                 continue
             if registration.transport == "expo":
                 if not expo.is_expo_token(registration.token or ""):
@@ -378,14 +399,18 @@ class PushModule:
                     )
         return sent
 
-    def _send_relay(self, origin: str, entries: List[Tuple[str, Dict[str, Any]]]) -> int:
+    def _send_relay(self, origin: str, entries: List[Tuple[str, str, "relay.Pair", Dict[str, Any]]]) -> int:
         try:
-            outcomes = relay.send(origin, [entry for _, entry in entries], pacing=self._relay_pacing)
+            outcomes = relay.send(
+                origin, [entry for _, _, _, entry in entries], pacing=self._relay_pacing, clock=self._clock
+            )
         except Exception as exc:
             logger.warning("hermie: relay delivery to %s failed: %s", origin, type(exc).__name__)
             return 0
         sent = 0
-        for (installation_id, entry), outcome in zip(entries, outcomes):
+        now = self._clock()
+        for (installation_id, user_id, pair, entry), outcome in zip(entries, outcomes):
+            self._relay_trust.record(pair, user_id, outcome, now)
             hint = relay.handle_hint(entry.get("handle"))
             if outcome.status == relay.SENT:
                 sent += 1

@@ -122,6 +122,24 @@ MAX_PACED_HANDLES = 1024
 MAX_ORIGIN_HOLD_SECONDS = 3_600
 MAX_HANDLE_HOLD_SECONDS = 86_400
 
+# A relay answers `gone` for an unknown handle and for a wrong secret alike, and
+# it counts those answers against the CALLER — this gateway — not against the
+# row that caused them. A co-user who keeps writing rows with made-up handles
+# could otherwise spend the gateway's whole allowance and have the relay turn
+# away everybody else's notifications. So each person whose rows are on this
+# gateway gets a small allowance of their own: after this many `gone` answers in
+# an hour, that person's rows that have never been delivered to are not sent
+# until the hour has passed. A row that has been delivered to is proven and
+# keeps being served.
+GONE_BUDGET = 3
+GONE_WINDOW_SECONDS = 3_600
+
+# A (handle, secret) pair the relay said is gone is remembered, so a row
+# written again with the same pair is not sent again: a relay never hands a
+# handle out twice, so that answer will not change. Bounded like `Pacing`.
+GONE_MEMORY_SECONDS = 30 * 86_400
+MAX_REMEMBERED_PAIRS = 1024
+
 SENT = "sent"
 GONE = "gone"
 REJECTED = "rejected"
@@ -482,11 +500,66 @@ class Pacing:
             logger.warning(
                 "hermie: relay %s limited %s; leaving it alone for %ds", origin, handle_hint(handle), int(seconds)
             )
-        if len(self.handles) > MAX_PACED_HANDLES:
-            for stale in [k for k, at in self.handles.items() if at <= now]:
-                del self.handles[stale]
-            while len(self.handles) > MAX_PACED_HANDLES:
-                del self.handles[min(self.handles, key=self.handles.get)]
+        _bounded(self.handles, MAX_PACED_HANDLES, now)
+
+
+def _bounded(store: Dict[Any, float], cap: int, now: float) -> None:
+    """Keep *store* at *cap* entries: the lapsed go first, then the soonest to lapse."""
+    if len(store) <= cap:
+        return
+    for stale in [key for key, until in store.items() if until <= now]:
+        del store[stale]
+    while len(store) > cap:
+        del store[min(store, key=store.get)]
+
+
+Pair = Tuple[str, str, str]  # (relay origin, handle, secret)
+
+
+class Trust:
+    """What the relay has said about rows, kept so it does not have to say it twice.
+
+    Three memories, all of them bounded and all of them in this process only:
+    pairs that came back `gone`, pairs that have been delivered to (proven),
+    and when each person's rows last cost a `gone`. See :data:`GONE_BUDGET`.
+    """
+
+    def __init__(self) -> None:
+        self.gone: Dict[Pair, float] = {}  # pair -> until when it is remembered
+        self.proven: Dict[Pair, float] = {}  # pair -> until when it is remembered
+        self.failures: Dict[str, List[float]] = {}  # user id -> when their rows came back gone
+
+    def is_gone(self, pair: Pair, now: float) -> bool:
+        return self.gone.get(pair, 0.0) > now
+
+    def is_proven(self, pair: Pair, now: float) -> bool:
+        return self.proven.get(pair, 0.0) > now
+
+    def over_budget(self, user_id: str, now: float) -> bool:
+        recent = [at for at in self.failures.get(user_id, []) if now - at < GONE_WINDOW_SECONDS]
+        if recent:
+            self.failures[user_id] = recent
+        else:
+            self.failures.pop(user_id, None)
+        return len(recent) >= GONE_BUDGET
+
+    def record(self, pair: Pair, user_id: str, outcome: "Outcome", now: float) -> None:
+        if outcome.status == SENT:
+            self.proven[pair] = now + GONE_MEMORY_SECONDS
+            self.gone.pop(pair, None)
+            _bounded(self.proven, MAX_REMEMBERED_PAIRS, now)
+        elif outcome.status == GONE:
+            self.gone[pair] = now + GONE_MEMORY_SECONDS
+            self.proven.pop(pair, None)
+            _bounded(self.gone, MAX_REMEMBERED_PAIRS, now)
+            failures = self.failures.setdefault(user_id, [])
+            failures.append(now)
+            del failures[:-GONE_BUDGET]
+            if len(self.failures) > MAX_REMEMBERED_PAIRS:
+                for user in [u for u, times in self.failures.items() if now - max(times) >= GONE_WINDOW_SECONDS]:
+                    del self.failures[user]
+                while len(self.failures) > MAX_REMEMBERED_PAIRS:
+                    del self.failures[min(self.failures, key=lambda u: max(self.failures[u]))]
 
 
 def _round(
