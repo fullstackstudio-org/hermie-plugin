@@ -1,0 +1,34 @@
+{
+  "files": {
+    "assets/de-q4e1toa0.js": {
+      "bytes": 95216,
+      "sha256": "319f9afc336fae629263a18ef2b6cc0499fb4bf03c8b3d8ae3b92eff387dece8"
+    },
+    "assets/index-3CTxcUEs.js": {
+      "bytes": 281822,
+      "sha256": "dc46ca5114d07c531c66c1c1fc8e9ce297f6068f84a55757a69ecb0df64a0d5b"
+    },
+    "assets/index-CRz-VN0b.css": {
+      "bytes": 11070,
+      "sha256": "10fe3b9b35c4dde66e19d1e332bff038452f917e3e7acd64b3fcd35aeeb248bc"
+    },
+    "assets/nl-B1zos00S.js": {
+      "bytes": 90915,
+      "sha256": "0ead626fa45686cbb26d71bc94181d568d687c82448b90b1831ac07733353bc1"
+    },
+    "assets/react-DNOZjj4h.js": {
+      "bytes": 185293,
+      "sha256": "abe9612578de4d759c35a5e97b1ddcd502b1a656104822f5c71a664f2998c0de"
+    },
+    "index.html": {
+      "bytes": 1243,
+      "sha256": "854709a32b1281d1157050caff8e1575ea025f75beaba07b7361b870f491ef0b"
+    }
+  },
+  "name": "hermie-web-client",
+  "sourceCommit": "fd90d66a86f79757baf4cf1c401c1d5d39cb1c5c",
+  "sourceRepo": "fullstackstudio-org/hermie",
+  "totalBytes": 665559,
+  "v": 1,
+  "version": "0.2.0"
+}

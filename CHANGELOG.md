@@ -6,6 +6,8 @@ people.
 
 ## Unreleased
 
+## 0.10.0 — 2026-10-03
+
 ### Added
 
 - **`web.client`: the plugin carries Hermie's web client.** A build of the browser client sits in
@@ -16,8 +18,8 @@ people.
   dashboard would not serve; at most 200 files and 8 MB) and only then advertises the capability
   `web.client` and an advert block `web` with the client's path, version, commit, file count and
   size. A folder that does not match is logged once as a warning and not advertised; a tree without
-  one loads as before. The first build imported is web client 0.2.0 from app commit `125f64dbdffe`,
-  the boot screens only.
+  one loads as before. The client build carried is web client 0.2.0 from app commit
+  `fd90d66a86f7` (6 files, 665,559 bytes): the boot screens and the app shell.
 - **`modules.web`**, on by default. Off withdraws the advert and skips the check. It does not remove
   or block the files: the dashboard serves them to whoever it lets in either way.
 - **`scripts/import_web_client.py`** puts a client build into `dashboard/app/`, after the same

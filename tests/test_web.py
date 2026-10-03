@@ -507,14 +507,16 @@ def test_the_check_runs_once_at_load_and_never_on_a_hook(dashboard, loaded, monk
 # -- the build in this repository ----------------------------------------------
 
 
-def test_the_committed_client_is_intact_or_absent():
-    """What `register` will find on a gateway that installs this tree."""
+def test_the_committed_client_is_intact():
+    """What `register` will find on a gateway that installs this tree.
+
+    A client is committed, so a vanished or damaged `dashboard/app/` fails here.
+    """
     result = web.verify(ROOT / "dashboard")
 
-    assert result.status in (web.INTACT, web.ABSENT), result.summary()
-    if result.ok:
-        manifest = json.loads((ROOT / "dashboard" / "app" / "build.json").read_text())
-        assert result.advert_block()["commit"] == manifest["sourceCommit"][:12]
+    assert result.status == web.INTACT, result.summary()
+    manifest = json.loads((ROOT / "dashboard" / "app" / "build.json").read_text())
+    assert result.advert_block()["commit"] == manifest["sourceCommit"][:12]
 
 
 # Everything the dashboard may serve from this plugin outside `app/`. The static
@@ -690,7 +692,7 @@ def test_the_committed_client_passes_the_import_limits(importer, capsys, offline
     code, out, err = run(importer, capsys, "--check")
 
     assert code == 0, err
-    assert out.startswith("present=")
+    assert out.startswith("present=true\n")
 
 
 def test_the_command_line_needs_exactly_one_mode(importer, capsys):
