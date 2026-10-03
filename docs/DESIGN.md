@@ -28,9 +28,50 @@ have a hook.
 | `post_llm_call` | once per turn, after the model answered | `session_id`, `turn_id`, `assistant_response`, `platform` |
 | `on_session_end` | once per turn, at the end | `session_id`, `turn_id`, `completed`, `failed`, `interrupted` |
 | `pre_approval_request` | an agent stopped to ask for approval | `surface`, `session_key`, `description`, `request_id`, `turn_id` |
+| `post_approval_response` | that approval was answered, timed out or was withdrawn | the same, plus `choice`, `coalesced` |
 | `pre_tool_call` | before every tool call | `tool_name`, `args`, `session_id`, `tool_call_id` |
+| `post_tool_call` | after one (read for `clarify` only) | `tool_name`, `session_id`, `tool_call_id`, `status`, `result` |
 | `pre_llm_call` | before every model call | `session_id`, `sender_id` |
 
+**Hooks only some gateways have.** The fork fires `pre_confirm_request` (a
+`confirm` request was written to the person's apps: `session_id` — the RUNTIME
+id —, `session_key`, `request_id`, `level`, `user_id`, `expires_at`, `reached`;
+never the title, summary or detail) and `on_passkey_change` (`change`,
+`user_id`, `credential`, `at`, `via`). A gateway that does not know a hook calls
+registering for it an error in `hermes plugins doctor`, so the plugin registers
+each only when the gateway's own `VALID_HOOKS` names it, and does not list any
+in `provides_hooks`: they are declared under `optional_hooks`, a sibling key in
+`plugin.yaml` for a gateway that supports it (the fork's `validate` and `doctor`
+accept it). A gateway without that support ignores the key, and there `hermes
+plugins validate` reports the registered hooks as undeclared while `doctor` only
+warns. A gateway that cannot be asked registers none. On upstream
+that means: no registration, no log line, no push, no capability claimed.
+
+Three more are **named here and fired by no gateway yet**. They are the
+smallest shape that lets a plugin push for the requests that have no hook of their
+own, and they are what a fork change should implement. All three are observers
+that fire off the request's own thread, like `pre_confirm_request`, and never carry
+what the person is being asked:
+
+| Hook | Fires | Kwargs |
+|---|---|---|
+| `pre_server_request` | a server request was written to the person's apps, for the methods `secret`, `sudo`, `vault.unlock_prompt`, `vault.code`, `vault.save_login` and `clarify` | `method`, `request_id`, `session_id` (runtime), `session_key`, `user_id`, `expires_at`, `reached` |
+| `post_server_request` | that request stopped being open, for those methods and for `confirm` | `method`, `request_id`, `session_id`, `session_key`, `user_id`, `reason` (`answered`, `resolved`, `timeout`, or any cancellation reason) |
+| `on_background_complete` | something sent to the background finished | `session_id`, `session_key`, `task_id`, `user_id`; never the result |
+
+`pre_server_request` is what gives a clarify question its request id. Once it has
+actually been **heard** in this process the plugin stops raising the clarify
+notification from `pre_tool_call`, which has no id, so a question is announced
+once; a gateway that merely names the hook in `VALID_HOOKS` and fires nothing
+keeps its tool-hook clarify. The first question of a process can arrive before
+the first server request and so may be announced by both, once. A clarify
+raised from the tool hook is cleared from the tool hook, whatever was heard
+since.
+
+**Where these hooks run.** `on_passkey_change` fires in the dashboard process,
+which handles the passkey routes, so the security push is built and sent from
+that process's plugin instance, its registrations and its state file: the
+dedupe claims and retired devices are that process's, not the gateway's.
 Dispatch is signature-inspected: a callback declaring `**kwargs` receives the
 whole payload and keeps receiving fields that are added later, while a narrow
 signature silently stops seeing new ones. Every callback here takes `**kwargs`,
@@ -55,10 +96,17 @@ value to a queue.
   turns nothing on is worse than no switch. This is the one place where the
   plugin is strictly less capable than the daemon ADR-0017 described, and it is
   a gap in Hermes, not in the design.
-- **No clarify hook.** `clarify` is an ordinary tool, so it is caught through
-  `pre_tool_call`. The clarify request id is minted inside the gateway's
+- **No clarify hook, and none for `secret`, `sudo` or `vault.*`.** `clarify` is
+  an ordinary tool, so it is caught through `pre_tool_call` and its end through
+  `post_tool_call`. The clarify request id is minted inside the gateway's
   blocking prompt and is not visible to a plugin, so a clarify notification
-  carries no id: the app opens the chat and finds the open question itself.
+  seen this way carries no id: the app opens the chat and finds the open
+  question itself. The secure inputs are asked through a callback the plugin
+  cannot see at all; `pre_server_request` above is what would show them.
+- **No hook carries the runtime session id, except `pre_confirm_request`.** The
+  approval and tool hooks name a conversation by its stored key. The app files
+  an open request under the live id, which is a different string, so an approval
+  push carries the key as `sessionKey` and no `sessionId`.
 - **No client-presence list.** `session.active_list` reports the calling
   connection's own session and nothing about anybody else's, exactly as
   ADR-0017 found. Suppression therefore stays the `seen` heartbeat the app
@@ -338,8 +386,13 @@ Registrations are not the plugin's state at all — they live in the app's
 | a turn finished | `on_session_end` (`completed`) | `turn_done` |
 | a turn failed | `on_session_end` (`failed`/not completed) | `turn_failed` |
 | a turn was interrupted | `on_session_end` (`interrupted`) | *nothing — somebody pressed stop* |
-| approval requested | `pre_approval_request` (not `surface: smart`) | `request` |
-| a question asked | `pre_tool_call` (`tool_name == "clarify"`) | `request` |
+| approval requested | `pre_approval_request` (not `surface: smart`) | `request`, `method: approval` |
+| a question asked | `pre_tool_call` (`tool_name == "clarify"`), unless `pre_server_request` is there | `request`, `method: clarify` |
+| a server request opened | `pre_server_request` (secure inputs, clarify) | `request`, `method` as the gateway names it |
+| a `confirm` request opened | `pre_confirm_request` | `request`, `method: confirm`, `level` |
+| a background task finished | `on_background_complete` | `turn_done`, `event: background.complete` |
+| a passkey added or revoked | `on_passkey_change` | `security` |
+| a request stopped being open | `post_approval_response`, `post_tool_call` (`clarify`), `post_server_request` | `request`, `clear: true` |
 | cron delivered | `post_llm_call` inside a cron run | `cron` |
 | a cron job declared its own failure | `post_llm_call`, `[CRON_FAILURE]` on the first line | `cron_failed` |
 | a cron run's turn finished | `on_session_end` (`completed`) inside a cron run | `cron_done` |
@@ -379,7 +432,11 @@ needs a fire site in `cron/scheduler.py`, which is a change to Hermes.
 ### Dedupe
 
 Every notification has an id derived from the identity of the fact, not from a
-counter: `sha256(kind, session, request/turn id)`. The same approval described
+counter: `sha256(kind, session, request id)`, or, for an approval whose hook
+carries no request id (the gateway path), `(session, tool call id, description)`.
+The turn id is not used for that: it is shared by every approval in a turn, and
+the second approval would be dropped as already sent while the first one's clear
+withdrew both. The same approval described
 twice collides on purpose; a finished turn and a failed turn on the same turn id
 do not. Claims live in the state file for 24 hours.
 
@@ -539,11 +596,16 @@ against it.
 | Field | When | What |
 |---|---|---|
 | `v`, `type`, `bot`, `at`, `eventId` | always | the shape, the kind, the bot, the second, the dedupe id |
-| `sessionId` | where known | the session the turn happened in |
+| `sessionId` | where known | the session the event happened in; for a `request` the RUNTIME id, or absent |
+| `sessionKey` | requests | the stored id of a request's conversation |
 | `sessionKind` | where readable | `canonical` \| `branch` \| `other` |
 | `gatewayKey` | where known | which gateway sent it |
-| `requestId` | approvals; a clarify only when known, which today is never | the request to re-read |
-| `method` | requests | `approval` or `clarify` |
+| `requestId` | every request but a clarify seen through the tool hook | the request to re-read |
+| `method` | requests | `approval`, `clarify`, `secret`, `sudo`, `vault.unlock_prompt`, `vault.code`, `vault.save_login`, `confirm` |
+| `level` | `confirm` | `plain` \| `passkey` |
+| `event` | background tasks | `background.complete` |
+| `change` | `security` | `added` \| `revoked` |
+| `clear`, `reason`, `replaces` | clearing pushes | `true`; `answered` \| `cancelled` \| `timeout`; the withdrawn notification's `eventId` |
 | `cron`, `cronCertain`, `jobId` | cron runs | that it was scheduled, how sure, and which job |
 | `preview` | opt-in | the text |
 
@@ -566,6 +628,118 @@ notifications because somebody is still being asked. Those two hooks carry no
 `task_id`, so the answer there comes from `HERMES_CRON_SESSION` or from a
 `cron_…` session id; core fills in `session_id` on an approval hook when the
 context has one.
+
+### Requests that are not approvals
+
+`approval` was the first request a phone was told about and the only one with
+buttons. The native app answers more, and the plugin tells it about them with
+the same `type: request` and a `method` that says which. What each may say and
+offer is a table in the contract (`requests.methods`), and the rules behind it:
+
+- **A request that takes something from the person says nothing about itself.**
+  A secure input says which *kind* of thing is wanted, from a fixed list of
+  sentences, and never the variable, the site, the command or the hint. No
+  preview, whatever the device and the gateway allow: the text of a password
+  prompt is exactly what a lock screen must not show. These sentences are
+  `events.SECURE_INPUT_BODY`.
+- **No Allow, no Deny.** The category is posted for an approval and nothing
+  else. A secure input is typed. A `confirm` is the person's own act: at
+  `passkey` only the app can run the ceremony, and at `plain` a tap on a
+  notification (possibly on a locked screen, possibly not even the person's
+  hand) would be the very thing the request exists to ask for. The contract has
+  `category.notFor.methods` so a sender cannot forget.
+- **A confirmation says nothing about what it confirms.** The hook never tells
+  the plugin the title, summary or detail, so there is no text to preview; the
+  app shows the request once the notification has opened it. The level is the one
+  thing it says ("Confirm this in the app" at `passkey`), and a level this build
+  has never heard of is worded as the stricter one.
+- **A request bound to a person goes to that person's devices.** At `passkey` the
+  request is bound to one user, and so is its notification: a device in another
+  person's bag is not asked, and neither is one in the legacy shared bag, which
+  names nobody. At `plain` a device that names nobody still is, as an approval
+  always reached it. A `passkey` confirmation that names no person is dropped:
+  sent to everyone it would tell the wrong people that something waits for one
+  of them. `Notification.user_id` and `user_strict` carry this, and it is never
+  put on the wire.
+- **`sessionId` is the runtime id or it is absent.** An open request is filed
+  under the live session's id, and the app matches the notification to it by
+  that id. Hooks that name a conversation name it by its stored key, which never
+  matches; an approval push once sent the key as `sessionId` and an Allow from the
+  lock screen quietly became "open the chat". The key now travels as `sessionKey`,
+  which is also what the session's kind is read from and what a tap opens.
+  `pre_confirm_request` and `pre_server_request` carry the live id, and so the
+  push does. A cost: Web Push's shipped service worker tags a notification by
+  `sessionId`, so an approval is tagged by its bot alone there until the worker
+  reads `sessionKey`, and the frozen Expo app's `pushDestinationOf` ignores
+  `sessionKey`, so a request in a branch opens that bot's chat there (the native
+  app reads it).
+- **A Web Push row gets a request without buttons only if its worker says it
+  reads methods.** The worker shipped with the Expo web build adds Allow and Deny
+  to every `type: request` push. A `confirm` or a secure input must never have
+  them, so it is sent to a Web Push row only when the row says
+  `requestMethods: true`, which that worker never writes and a worker that reads
+  `method` (the web client's) does. Approvals and clarifies are unchanged, and
+  other transports are not asked.
+
+### Clearing a request
+
+A request that stopped being open (answered on another device, cancelled, timed
+out) leaves a notification on every device it reached, with buttons that no
+longer do anything. A **clearing push** says so: `type: request` with `clear:
+true`, the same `method`, `requestId` and conversation, a `reason`, and
+`replaces`, the `eventId` of the notification it withdraws. `replaces` is the only
+handle for a clarify seen through the tool hook, which never had a request id; the
+raise and the clear are built by one function each so they cannot drift apart. Its
+own `eventId` differs from the one it withdraws, because the same one would be
+dropped as already sent.
+
+It comes from `post_approval_response` (not on the smart path, not for a
+coalesced follower, which would withdraw somebody else's open request),
+`post_tool_call` for `clarify`, and `post_server_request`. An approval's
+`choice` becomes `answered` (`once`, `session`, `always`, `deny`), `timeout`, or
+`cancelled` for everything else.
+
+**It is opt-in per device**: a registration row with `clears: true`. A confirmation's clear is as strict
+as its raise: the module remembers which requests were bound to a person, and a
+request it never saw raised (a restart in between) is taken to be the strict
+kind. A sender
+cannot tell which build of a client is on the other end, and a build that does not
+know the field would show the push as a new request with its Allow and Deny. The
+capability `push.clear` says the gateway sends one.
+
+**It has no visible half where a transport can do without one.** Expo gets a
+`_contentAvailable` data message with no title, body or sound. Web Push gets
+`{data}` alone, with `data.clear`: a worker must show nothing for it, and Chrome
+may then show its generic "updated in the background" notice unless the worker
+closes the existing notification for that request in the same event.
+
+**The relay cannot carry one yet.** Every message the relay sends is an APNs
+alert with a sound, so the only way to withdraw a request through it would be a
+second notification, which buzzes the person who has just answered. A relay row
+therefore gets no clearing push (`relay.CAN_CLEAR`), and `push.clear.relay` is not
+claimed. What the relay would need is a message that is not an alert: `apns-push-type:
+background`, `content-available`, priority 5, no sound, the same collapse id. Nothing
+else in the relay changes for any of the types above.
+
+### The security notice
+
+A passkey added to or removed from a person's account, through the dashboard's
+passkey routes, fires `on_passkey_change`. A passkey nobody expected is how a
+stolen session that enrolled one shows up, so the notice is not a message and
+none of a message's rules apply: it is not one of the switches (it is not in
+`TYPES`; no registration row has a key for it), `push.types` does not hold it
+back, a mute does not apply, and an open chat does not suppress it. It goes to
+every device of that person and to no other, a device in the legacy bag
+included in the "no other". It still obeys what is not a preference: a device
+the transport said is gone, the preview ceiling, and the relay's rule that text
+never crosses it.
+
+The lock screen says "A passkey was added" or "A passkey was removed". The
+credential's name appears only as the preview text, on a device that asked for
+previews through a transport that may carry them. The credential id, the
+relying party and how the change was authorised never travel at all. An event
+that names no person is dropped: a security notice for nobody would be one for
+everybody.
 
 ### Which gateway sent it
 
