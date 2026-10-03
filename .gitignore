@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# Left behind only if scripts/import_web_client.py is interrupted.
+dashboard/.app-import-*/
+dashboard/.app-retired-*/

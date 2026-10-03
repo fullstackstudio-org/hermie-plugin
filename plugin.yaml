@@ -12,7 +12,11 @@ description: >-
   the gateway thinks it is talking to and how it worked that out. Registrations
   and settings live in the gateway's own profile ui_meta. Notifications go out
   through Expo, Web Push, or the Hermie push relay for the native Apple apps,
-  and message text never crosses the relay in the clear.
+  and message text never crosses the relay in the clear. Also carries a build of
+  Hermie's web client, which the dashboard serves from its own static route at
+  /dashboard-plugins/hermie/app/index.html behind its own sign-in; the plugin
+  checks the files against their build manifest at load and advertises the
+  client only when they match.
 author: FullStack Studio
 license: MIT
 homepage: https://github.com/fullstackstudio-org/hermie-plugin
@@ -57,6 +61,14 @@ config_schema:
     type: bool
     default: true
     description: "Serve the memory browser routes on the dashboard."
+  modules.web:
+    type: bool
+    default: true
+    description: >-
+      Advertise the web client bundled in dashboard/app/ (capability
+      web.client and the advert's web block), once its files matched their
+      build.json at load. Off withdraws the advert only: the dashboard still
+      serves the files to whoever it lets in.
   memory.browse:
     type: bool
     default: true

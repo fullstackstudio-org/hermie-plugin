@@ -69,3 +69,35 @@ def test_the_relay_origins_are_published_only_when_given():
     assert published["relayOrigins"] == ["https://push.hermie.dev"]
     # Additive: a reader of the shape this advert has always had is not disturbed.
     assert contract.read_capabilities(published) == []
+
+
+def test_every_module_that_ships_has_its_switch_in_the_manifest():
+    """`module_states` reads `modules.<name>` for each of these, defaulting to on."""
+    from hermie_plugin import IMPLEMENTED
+
+    schema = yaml.safe_load((ROOT / "plugin.yaml").read_text())["config_schema"]
+    switches = {key[len("modules."):] for key in schema if key.startswith("modules.")}
+
+    assert switches == set(IMPLEMENTED)
+    for name in IMPLEMENTED:
+        assert schema[f"modules.{name}"]["type"] == "bool"
+        assert schema[f"modules.{name}"]["default"] is True
+    assert not set(IMPLEMENTED) & set(contract.PLANNED_MODULES)
+
+
+def test_the_dashboard_manifest_follows_the_plugin_version_and_keeps_its_tab_hidden():
+    import json
+
+    manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text())
+
+    assert manifest["version"] == contract.PLUGIN_VERSION
+    assert manifest["tab"] == {"hidden": True}
+
+
+def test_the_web_block_is_published_only_when_given():
+    block = {"path": "/dashboard-plugins/hermie/app/index.html", "version": "0.2.0", "commit": "0123456789ab", "files": 6, "bytes": 1}
+
+    assert "web" not in contract.advert(modules={}, capabilities=[])
+    published = contract.advert(modules={"web": "on"}, capabilities=[contract.CAP_WEB_CLIENT], web=block)
+    assert published["web"] == block and published["web"] is not block
+    assert contract.read_capabilities(published) == ["web.client"]

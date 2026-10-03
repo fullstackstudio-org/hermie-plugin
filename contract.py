@@ -200,6 +200,12 @@ CAP_PROFILE_DISPLAY_NAME = "profiles.display_name"
 # advert carries the answer. Advertised only when the operator switched the
 # check on: the string says an answer is there, not that one could be.
 CAP_UPDATE_CHECK = "plugin.update_check"
+# The web client in `dashboard/app/` matched its own `build.json` when this
+# gateway loaded the plugin, and `modules.web` is on. The advert's `web` block
+# says where it is. Like the memory strings this names an HTTP surface: files
+# the dashboard serves from its own static route, behind its own sign-in. The
+# string withdraws the offer, never the files (see web.py).
+CAP_WEB_CLIENT = "web.client"
 
 # Modules that exist as a name and a config key but have no implementation yet.
 # They are advertised as "planned" rather than silently missing so the app can
@@ -220,6 +226,7 @@ def advert(
     installed_ref: str = "",
     latest: str = "",
     relay_origins: Iterable[str] | None = None,
+    web: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """The value written to the ``hermie-plugin`` ui_meta key.
 
@@ -235,6 +242,11 @@ def advert(
     it to decide whether the relay IT registered with is served here before it
     moves a device onto a relay row. An app that does not know the field goes
     by `push.relay`, which is only claimed for the default relay.
+
+    `web` says where the bundled web client is and which build it is
+    (`path`, `version`, `commit`, `files`, `bytes`), and is present only beside
+    the `web.client` capability: when `modules.web` is on and the files matched
+    their `build.json` at load. Additive like `relayOrigins`; no `v` bump.
     """
     source: Dict[str, Any] = {"repo": REPO, "ref": installed_ref}
     if latest:
@@ -252,6 +264,8 @@ def advert(
     }
     if relay_origins is not None:
         value["relayOrigins"] = list(relay_origins)
+    if web is not None:
+        value["web"] = dict(web)
     return value
 
 
