@@ -6,6 +6,69 @@ people.
 
 ## Unreleased
 
+### Added
+
+- **`push.request.confirm`: a `confirm` request raises a notification.** On a gateway that fires
+  `pre_confirm_request` (the fork's), a `type: request` with `method: confirm`, `requestId`, `level`
+  (`plain` or `passkey`) and the runtime `sessionId`. It is posted under **no category** at either
+  level, so it never offers Allow or Deny: at `passkey` only the app can run the ceremony, and at
+  `plain` a tap on a notification would be the very confirmation being asked for. It carries no text
+  at all, because the gateway never says what is being confirmed. At `passkey` only the bound
+  person's own devices are asked, and a device in the legacy shared bag, which names nobody, is not
+  one of them.
+- **`push.security`: a passkey added or removed notifies that person, and cannot be muted.** On a
+  gateway that fires `on_passkey_change`, a `type: security` push with `change: added|revoked`. It
+  reaches every device of that person whatever they muted, whichever types they switched off,
+  whatever `push.types` says and whichever chat is open, and no other person's device. The lock
+  screen says "A passkey was added" or "A passkey was removed"; the credential's name appears only
+  as preview text. `security` is not a switch: it is not in `push.types` and a registration has no
+  key for it.
+- **`push.request.secure_input` and `push.background`: the other requests.** `pre_server_request`,
+  `post_server_request` and `on_background_complete` are the shape named for the fork to implement
+  (no gateway fires them yet), and the plugin is ready for them: `secret`, `sudo`,
+  `vault.unlock_prompt`, `vault.code` and `vault.save_login` raise a request push that says which
+  kind of thing is wanted and nothing else, with no category and no preview text whatever the
+  device allows; a clarify question gets its `requestId`; a finished background task is a
+  `turn_done` with `event: background.complete`.
+- **`push.clear`: a request that stopped being open is withdrawn.** After an answer, a cancellation
+  or a timeout (`post_approval_response`, `post_tool_call` for `clarify`, `post_server_request`) a
+  device whose row says `clears: true` gets a push with `clear: true`, the same `requestId` and
+  conversation, a `reason` and `replaces`, the `eventId` of what it withdraws. Expo gets a
+  content-available data message with nothing to show. A relay row gets none yet, because every
+  relayed message is an alert with a sound; `push.clear.relay` is claimed once `relay.CAN_CLEAR`
+  is.
+- **`sessionKey` on a request push**: the stored id of the conversation, which is what the session's
+  kind is read from and what a tap opens.
+- **Optional hooks are registered only where the gateway names them.** The five above are listened
+  to only when the gateway's own `VALID_HOOKS` has them, and are declared under `optional_hooks` in
+  `plugin.yaml` rather than `provides_hooks`, so an upstream gateway sees no registration, no error
+  and no push (on a gateway without `optional_hooks` support, `validate` reports them as undeclared).
+  The clarify push from the tool hook stands down only once `pre_server_request` has actually been
+  heard, not on the hook's name alone.
+- **A Web Push row gets a `confirm` or a secure input only if it says `requestMethods: true`.** The
+  worker shipped with the Expo web build adds Allow and Deny to every request, which these must never
+  have. Approvals are unchanged. A confirmation's clearing push reaches the same devices its raise
+  did, and a Web Push clearing push carries `data` alone. `post_approval_response` and
+  `post_tool_call` are now registered and declared.
+
+### Changed
+
+- **An approval's `sessionId` is the runtime id or it is absent.** The approval hook names the
+  conversation by its stored key, which is not the id the app files an open approval under, so a
+  notification that sent it as `sessionId` never matched and Allow from the lock screen fell back to
+  opening the chat. The key now travels as `sessionKey`, and `sessionId` is sent only where the
+  gateway gives the live id. Web Push's shipped service worker tags by `sessionId`, so an approval is
+  tagged by its bot alone until it reads `sessionKey`, and the frozen Expo app's `pushDestinationOf`
+  ignores `sessionKey`, so an approval or a clarify raised in a branch opens that bot's chat there
+  (the native app reads `sessionKey`). A clarify seen through the tool hook is treated the same way.
+- **An approval without a request id has its own notification id.** On the gateway path the approval
+  hooks carry no request id, and the turn id fell in for it, which two approvals in one turn share:
+  the second was dropped as already sent. The id is now built from the tool call id and the
+  description, and a clear names exactly its own notification.
+- The push contract's copy in `tests/fixtures/` is brought level with the app repository's (it had
+  fallen behind by `eventId`, `v` and `at`), and the service worker port in the contract tests uses
+  the contract's action ids, as the real worker does.
+
 ## 0.10.0 — 2026-10-03
 
 ### Added

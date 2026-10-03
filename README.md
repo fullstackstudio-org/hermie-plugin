@@ -41,6 +41,11 @@ That is the whole install. Hermes clones the repo into
 | **A bot wrote something** | a notification, except on the device that says it is reading that chat |
 | **A bot is asking for approval** | a notification with Allow and Deny, never suppressed |
 | **A bot asked a question** | a notification, never suppressed |
+| **A bot needs a secret, a password or a code** | a notification that says which kind and nothing about it, never suppressed (on a gateway that reports these; see below) |
+| **A bot asks you to confirm something** | a notification that opens the app, never one you can answer from the lock screen, never suppressed (on a gateway that fires `pre_confirm_request`) |
+| **A background task finished** | a notification, if the device asked for finished turns (on a gateway that reports it) |
+| **A passkey was added or removed** | a notification on every device of that person, whatever they muted or switched off (on a gateway that fires `on_passkey_change`) |
+| **A request stopped being open** | a silent message that tells the device to take the notification down, to a device that said it understands one |
 | **A turn finished or failed** | a notification, if the device asked for those |
 | **A cron job delivered** | a notification, recognised by the scheduler's own marker |
 | **A cron job finished or failed** | a notification, if the device asked for those |
@@ -58,6 +63,47 @@ Tapping Allow does not approve anything by itself. The app opens, connects to
 the gateway, re-reads the open requests, and answers only if that request is
 still open and still says what the notification said it did.
 
+### Requests that are not approvals
+
+A request notification is the same `type: request` with a different `method`, and
+the method decides what it may say and offer:
+
+- **Secure inputs** (`secret`, `sudo`, `vault.*`) say *which kind* of thing is
+  wanted ("Needs a secret", "Needs a verification code") and never what: no
+  variable name, no site, no command, and no preview text even on a device that
+  asked for previews. They get no Allow or Deny, because a password is typed.
+- **`confirm`** gets no Allow or Deny at either level. At `passkey` only the app
+  can run the ceremony; at `plain` a tap on a notification would be the very
+  thing the request exists to ask for, from a screen that may be locked. It has
+  no text either: the gateway never tells a plugin what is being confirmed. At
+  `passkey` the request is bound to one person and so is the notification: only
+  that person's devices are asked, and a device in the legacy shared bag, which
+  names nobody, is not one of them.
+- **A passkey added or removed** is `type: security`. It reaches every device of
+  that person whatever they muted, whichever types they switched off and
+  whichever chat is open, and is never held back by `push.types`. The lock screen
+  says "A passkey was added" or "A passkey was removed"; the credential's name
+  appears only as preview text, on a device that asked for previews and a gateway
+  that allows them.
+- **A clearing push** follows an answer, a cancellation or a timeout. It carries
+  no text and no category, and goes only to a registration row that says
+  `clears: true`: a build that does not know the field would show it as a new
+  request. Expo gets it as a content-available data message and Web Push as
+  `{data}` alone with `data.clear` (a worker must show nothing for it). A relay
+  row gets none yet.
+- **Two registration-row keys steer this.** `clears: true` says the device
+  understands a clearing push. `requestMethods: true`, on a Web Push row, says its
+  worker reads a request's `method`; without it a `confirm` or a secure input is not
+  sent to that row at all, because the worker shipped with the Expo web build adds
+  Allow and Deny to every request. Approvals and clarifies go to every row.
+
+Which of these a gateway raises depends on the hooks it fires. `pre_confirm_request`
+and `on_passkey_change` are the fork's; `pre_server_request`,
+`post_server_request` and `on_background_complete` are named in
+[docs/DESIGN.md](docs/DESIGN.md) for the fork to implement and no gateway fires
+them yet. The plugin listens to a hook only where the gateway's own list names it,
+so on any other gateway nothing changes and nothing is logged.
+
 ### What a payload carries
 
 Everything here is a **hint the app resolves against the gateway**, never an
@@ -67,15 +113,20 @@ empty, so a reader checks for absence.
 | Field | Always? | What it is |
 |---|---|---|
 | `v` | yes | the payload shape, `1` |
-| `type` | yes | `message`, `request`, `cron`, `cron_done`, `cron_failed`, `turn_done`, `turn_failed` |
+| `type` | yes | `message`, `request`, `cron`, `cron_done`, `cron_failed`, `turn_done`, `turn_failed`, or `security`, which is not a switch |
 | `bot` | yes | the bot's name, which is its profile name; the notification's visible title is the profile's display name where it has one |
 | `at` | yes | unix seconds |
 | `eventId` | yes | the dedupe id, so two hooks describing one fact buzz once |
-| `sessionId` | where known | the session the turn happened in |
+| `sessionId` | where known | the session the event happened in. For a `request` it is the **runtime** session id the open request is filed under, and is left out when this gateway cannot know it; for every other type it is the stored session id |
+| `sessionKey` | requests | the stored id of the conversation a request is in, so a tap can open it |
 | `sessionKind` | where readable | `canonical`, `branch` or `other` — which conversation to open |
 | `gatewayKey` | where known | which gateway sent it, for a device set up against several |
-| `requestId` | approvals | re-validated against the gateway before anything is answered |
-| `method` | requests | `approval` or `clarify`; only an approval is posted under the `hermie.request` category, which carries Allow and Deny |
+| `requestId` | every request but a clarify seen through the tool hook | re-validated against the gateway before anything is answered |
+| `method` | requests | `approval`, `clarify`, `secret`, `sudo`, `vault.unlock_prompt`, `vault.code`, `vault.save_login` or `confirm`; only an approval is posted under the `hermie.request` category, which carries Allow and Deny |
+| `level` | `confirm` | `plain` or `passkey`; neither is ever offered as a notification action |
+| `event` | background tasks | `background.complete`, on a `turn_done` |
+| `change` | `security` | `added` or `revoked`; never which passkey |
+| `clear`, `reason`, `replaces` | clearing pushes | `true`, why (`answered`, `cancelled`, `timeout`), and the `eventId` of the notification it withdraws |
 | `cron`, `cronCertain` | cron runs | that this was a scheduled run, and whether that is a fact or a guess |
 | `jobId` | where known | the name you gave the job |
 | `preview` | opt-in | the text, only where the device asked **and** the gateway allows it |
@@ -113,6 +164,12 @@ that cannot work is worse than one that is absent.
 | `push.seen.per_chat` | a `{bot, at}` heartbeat is understood, so suppression is per chat |
 | `push.per_bot` | a chat's own switches (`push.perBot`) are folded over the global ones |
 | `push.gateway_key` | every payload names the gateway it came from |
+| `push.clear` | a request that stopped being open is followed by a clearing push, to an Expo or Web Push row that says `clears: true` |
+| `push.clear.relay` | the same, to a relay row. **Not claimed yet**: the relay cannot carry a message that is not an alert |
+| `push.request.confirm` | a `confirm` request raises a notification (this gateway fires `pre_confirm_request`) |
+| `push.request.secure_input` | a secure input, and a clarify question with its id, raise a notification (this gateway reports its server requests) |
+| `push.security` | a passkey change notifies that person's devices (this gateway fires `on_passkey_change`) |
+| `push.background` | a finished background task notifies (this gateway reports it) |
 | `push.session_kind` | a payload says whether its session is the bot's chat, a branch, or neither |
 | `push.type.turn_done` | "a turn finished" is switched on |
 | `push.type.turn_failed` | "a turn failed" is switched on |
