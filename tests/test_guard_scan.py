@@ -104,11 +104,24 @@ def scanners(tmp_path):
     return {name: make_scanner(tmp_path / f"scanner-{name}") for name in ("fork", "upstream")}
 
 
+@pytest.fixture(autouse=True)
+def _not_in_ci(monkeypatch):
+    """These tests hand the gate local scanners, which it refuses under GitHub Actions."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+
 def run(plugin, scanners, *extra):
+    """The gate on local scanners only (``--only-roots``) unless the test names a pin file."""
     argv = ["--plugin", str(plugin)]
     for name, root in scanners.items():
         argv += ["--scanner-root", f"{name}={root}"]
+    if scanners and "--pins" not in extra:
+        argv.append("--only-roots")
     return guard.main(argv + list(extra))
+
+
+def scanner_saying(directory, verdict):
+    return make_scanner(directory, FAKE_SCANNER.replace('DEFAULT = "safe"', f'DEFAULT = "{verdict}"'))
 
 
 def verdict_is(plugin, wanted):
@@ -122,8 +135,89 @@ def test_a_clean_tree_passes_with_both_scanners(plugin, scanners, capsys):
     assert run(plugin, scanners) == 0
 
     out = capsys.readouterr().out
-    assert "scanner: fork" in out and "scanner: upstream" in out
-    assert "every scanner says safe" in out
+    assert "scanner: fork [blocking]" in out and "scanner: upstream [informational]" in out
+    assert "every blocking scanner says safe" in out
+
+
+# -- blocking and informational scanners (W3, amended for HERM-192) -----------
+
+
+def test_an_upstream_caution_is_reported_but_does_not_fail(plugin, tmp_path, capsys):
+    roots = {"fork": make_scanner(tmp_path / "f"), "upstream": scanner_saying(tmp_path / "u", "caution")}
+
+    assert run(plugin, roots) == 0
+    out = capsys.readouterr().out
+    assert "NOTED" in out and "verdict caution; findings: 1 high" in out
+    assert "every blocking scanner says safe; informational: upstream says caution (1 high)" in out
+
+
+@pytest.mark.parametrize("verdict", ["dangerous", "crash", "no-such-verdict"])
+def test_an_upstream_dangerous_or_unknown_verdict_or_crash_fails(plugin, tmp_path, verdict):
+    roots = {"fork": make_scanner(tmp_path / "f"), "upstream": scanner_saying(tmp_path / "u", verdict)}
+
+    assert run(plugin, roots) == 1
+
+
+def test_a_fork_caution_fails_even_when_upstream_says_safe(plugin, tmp_path):
+    roots = {"fork": scanner_saying(tmp_path / "f", "caution"), "upstream": make_scanner(tmp_path / "u")}
+
+    assert run(plugin, roots) == 1
+
+
+def test_only_informational_scanners_do_not_pass(plugin, tmp_path, capsys):
+    assert run(plugin, {"upstream": make_scanner(tmp_path / "u")}) == 1
+    out = capsys.readouterr().out
+    assert "no blocking scanner ran" in out and "not run (--only-roots)" in out
+
+
+def test_an_informational_scanner_that_cannot_be_fetched_fails(plugin, tmp_path, monkeypatch):
+    pins = tmp_path / "pins.json"
+    pins.write_text(json.dumps({"scanners": {
+        "fork": {"repo": "https://example.test/f.git", "commit": "a" * 40, "gate": "blocking"},
+        "upstream": {"repo": "https://example.test/u.git", "commit": "b" * 40, "gate": "informational"},
+    }}))
+    fork = make_scanner(tmp_path / "f")
+
+    def fetch(name, repo, ref, dest, **kwargs):
+        if name == "upstream":
+            raise guard.GuardError("connection reset")
+        return guard.Source(name, fork, repo, ref)
+
+    monkeypatch.setattr(guard, "fetch_scanner", fetch)
+
+    assert guard.main(["--plugin", str(plugin), "--pins", str(pins), "--workdir", str(tmp_path / "w")]) == 1
+
+
+def test_a_local_checkout_keeps_the_gate_of_the_pin_it_replaces(plugin, tmp_path, capsys, monkeypatch):
+    pins = tmp_path / "pins.json"
+    pins.write_text(json.dumps({"scanners": {
+        "upstream": {"repo": "https://example.test/u.git", "commit": "b" * 40, "gate": "informational"},
+        "fork": {"repo": "https://example.test/f.git", "commit": "a" * 40},
+    }}))
+    monkeypatch.setattr(guard, "fetch_scanner",
+                        lambda name, repo, ref, dest, **k: guard.Source(name, make_scanner(tmp_path / "fetched"), repo, ref))
+    local = scanner_saying(tmp_path / "local", "caution")
+
+    code = guard.main(["--plugin", str(plugin), "--pins", str(pins), "--scanner-root", f"upstream={local}",
+                       "--workdir", str(tmp_path / "w")])
+
+    out = capsys.readouterr().out
+    assert code == 0 and "in place of the pinned bbbbbbbbbbbb" in out and "scanner: fork [blocking]" in out
+
+
+def test_local_scanners_are_refused_in_ci(plugin, scanners, monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+    assert run(plugin, scanners) == 2
+    assert "in CI the pinned scanners decide" in capsys.readouterr().err
+
+
+def test_an_unknown_gate_is_refused(tmp_path):
+    pins = tmp_path / "pins.json"
+    pins.write_text(json.dumps({"scanners": {"x": {"repo": "https://example.test/x.git", "commit": "a" * 40,
+                                                   "gate": "advisory"}}}))
+    with pytest.raises(guard.GuardError, match="gate"):
+        guard.load_pins(pins, latest=False)
 
 
 @pytest.mark.parametrize("wanted", ["caution", "dangerous", "safe-but-blocked", "crash"])
@@ -227,6 +321,10 @@ def test_the_repositorys_own_pins_name_the_fork_and_upstream_at_full_commits():
     for pin in pins:
         assert pin["repo"].startswith("https://")
         assert guard.SHA_RE.match(pin["ref"]), "a pin is a commit, never a branch"
+    by_name = {p["name"]: p for p in pins}
+    assert by_name["fork"]["gate"] == "blocking" and by_name["upstream"]["gate"] == "informational"
+    # The fork that judges a web client bundle's JavaScript by token (HERM-192); the app pins the same commit.
+    assert by_name["fork"]["ref"] == "ff419bb82a1ccd6e9ece5684c175c06ccf0be023"
 
 
 def test_the_nightly_run_reads_a_branch_for_each_scanner():
@@ -422,8 +520,8 @@ def test_the_step_summary_is_written_when_the_runner_asks(plugin, scanners, tmp_
     run(plugin, scanners)
 
     text = target.read_text()
-    assert "| fork |" in text and "| upstream |" in text
-    assert "caution (fails)" in text
+    assert "| fork | blocking |" in text and "| upstream | informational |" in text
+    assert "caution (fails)" in text and "caution (noted)" in text
 
 
 # -- the early warning for the one finding this tree has had ------------------

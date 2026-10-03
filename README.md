@@ -521,13 +521,15 @@ GitHub-hosted runners. It needs no secret and asks for none.
 | Job | Runs | Takes |
 |---|---|---|
 | `test` | the test suite on Python 3.11 against the package versions Hermes itself locks, a compile of every module, and a check that nothing was skipped for a reason that is not expected | about a minute |
-| `guard-scan` | Hermes's plugin scanner, from the fork and from upstream, each at the commit named in `.github/scanner-pins.json`, over this checkout; fails on anything but `safe` | about a minute |
+| `guard-scan` | Hermes's plugin scanner, from the fork and from upstream, each at the commit named in `.github/scanner-pins.json`, over this checkout; the fork blocks on anything but `safe`, upstream is informational and fails only on `dangerous` | about a minute |
 | `web-bundle-verify` | checks `dashboard/app/` against its `build.json` with the plugin's own rules and the import limits, checks the app repository out at the commit `build.json` names, fails unless that commit is on the app's `main`, rebuilds the client with the Node version the app pins (`npm ci`, `npm run client:build`) and compares every file of the rebuild, `build.json` included, with `dashboard/app/`. Passes with nothing to do when there is no `dashboard/app/` | a few minutes, most of it `npm ci` |
 
-`guard-scan` is not a style check. Hermes scans this tree again after every
-`hermes plugins update`, and a `dangerous` verdict **disables the plugin on that
-gateway**, push notifications included, until someone re-enables it by hand. The
-job runs that same scan before a change is merged. A daily run
+`guard-scan` is not a style check. Hermes scans the new version of this tree
+before every `hermes plugins update` applies it, and a verdict short of `safe`
+**refuses the update on that gateway** (a `caution` needs a person, and the
+auto-update timer has none): the old version keeps running and nothing new
+arrives until the tree passes. The job runs that same scan before a change is
+merged. A daily run
 (`.github/workflows/scanner-nightly.yml`) asks the same of the newest scanners and
 only reports. `CONTRIBUTING.md` says how to run the scan on your own machine and
 how to move a pin.

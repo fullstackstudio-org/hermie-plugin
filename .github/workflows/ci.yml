@@ -89,12 +89,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Hermes re-scans this tree after every `hermes plugins update`, and a
-      # `dangerous` verdict disables the plugin on that gateway: push included.
-      # This runs the scanner the way that update does, with the fork and with
-      # upstream at the commits in .github/scanner-pins.json, over this checkout.
-      # Anything but `safe` fails the job. The scanners are put outside the tree
-      # so they are not scanned themselves.
+      # Hermes scans the new version of this tree before `hermes plugins update`
+      # applies it, and a verdict short of `safe` refuses the update on that
+      # gateway. This runs the scanner the way that update does, with the fork
+      # and with upstream at the commits in .github/scanner-pins.json, over this
+      # checkout. The fork is the blocking gate (anything but `safe` fails);
+      # upstream is informational (only `dangerous` fails) and its verdict goes
+      # into the step summary. The scanners are put outside the tree so they are
+      # not scanned themselves.
       - name: Scan the tree with the pinned scanners
         run: python scripts/guard_scan.py --workdir "$RUNNER_TEMP/scanners"
 
