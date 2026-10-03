@@ -3,7 +3,9 @@
 Hermie's gateway-side companion. It runs inside `hermes serve` as a Hermes
 plugin and does two things today: it sends **push notifications** to the devices
 that registered themselves, and it puts a little **context about the person and
-their device** into a bot's system prompt. `/me` says who it thinks you are.
+their device** into a bot's system prompt. `/me` says who it thinks you are. It
+also carries Hermie's **web client**, which the dashboard serves from its own
+static route (see "Web client").
 
 It has no inbound port, no account, and no credential of its own. The devices
 that want notifications write themselves into the gateway's own profile
@@ -128,6 +130,7 @@ that cannot work is worse than one that is absent.
 | `memory.browse` | a profile's memory can be read over the dashboard's plugin routes |
 | `memory.raw` | and read as it is stored, one document per backend |
 | `memory.edit` | and written |
+| `web.client` | the web client in `dashboard/app/` matched its `build.json` at load and `modules.web` is on; the advert's `web` block says where it is |
 
 A device's own switches are read over **every** type in the payload table above,
 so a registration that says `cron_done: true` or `cron_failed: true` is honoured
@@ -165,6 +168,10 @@ plugins:
         modules:
           push: true
           context: true
+          memory: true
+          # Advertise the bundled web client. Off withdraws the advert, not the
+          # files: see "Web client".
+          web: true
         push:
           # Which event types this gateway may notify about at all. A device
           # still has to ask for a type before it receives one.
@@ -458,7 +465,7 @@ GitHub-hosted runners. It needs no secret and asks for none.
 |---|---|---|
 | `test` | the test suite on Python 3.11 against the package versions Hermes itself locks, a compile of every module, and a check that nothing was skipped for a reason that is not expected | about a minute |
 | `guard-scan` | Hermes's plugin scanner, from the fork and from upstream, each at the commit named in `.github/scanner-pins.json`, over this checkout; fails on anything but `safe` | about a minute |
-| `web-bundle-verify` | **a placeholder, not yet active.** It becomes the check that a client bundle is the byte-for-byte build of reviewed, merged source. Until then it verifies nothing about a bundle and only refuses a `dashboard/app/` (a folder, a file or a dangling symlink) that arrives before that check exists | seconds |
+| `web-bundle-verify` | checks `dashboard/app/` against its `build.json` with the plugin's own rules and the import limits, checks the app repository out at the commit `build.json` names, fails unless that commit is on the app's `main`, rebuilds the client with the Node version the app pins (`npm ci`, `npm run client:build`) and compares every file of the rebuild, `build.json` included, with `dashboard/app/`. Passes with nothing to do when there is no `dashboard/app/` | a few minutes, most of it `npm ci` |
 
 `guard-scan` is not a style check. Hermes scans this tree again after every
 `hermes plugins update`, and a `dangerous` verdict **disables the plugin on that
@@ -478,12 +485,10 @@ Branches, or the API). The settings this repository is written for:
 - **Require a pull request before merging.** Nothing is pushed to `main`
   directly, release commits included.
 - **Require status checks to pass**, and require the branch to be up to date:
-  `test`, `guard-scan` and `web-bundle-verify`. The last is a placeholder today
-  and passes when there is no `dashboard/app/`; being required is what stops a
-  pull request that adds one from merging before the real verification exists.
-  Its name does not change when the real job replaces it, so this setting does
-  not either. Not the nightly run: it belongs to no pull request and cannot be
-  required.
+  `test`, `guard-scan` and `web-bundle-verify`. The last is what makes a client
+  bundle the build of merged source rather than whatever a pull request put in
+  `dashboard/app/`. Not the nightly run: it belongs to no pull request and
+  cannot be required.
 - **Do not allow bypassing the rule**, administrators included, and **block force
   pushes and deletion** of `main`.
 - **Approvals**: one approving review is the right setting once a second person
@@ -526,8 +531,8 @@ is pushed directly.
 A web client bundle is imported only through a pull request, and the template
 carries the checklist for one: only `dashboard/app/**`, the version and the
 changelog change, `build.json` names a source commit on the app repository's
-`main`, `guard-scan` is green, and `web-bundle-verify` is the real job rather
-than the placeholder. Reverting the import commit is the rollback.
+`main`, and `guard-scan` and `web-bundle-verify` are green. Reverting the import
+commit is the rollback.
 
 ## Memory
 
@@ -632,6 +637,88 @@ plugins:
         profiles:
           edit: false   # the route refuses with 403; read-only
 ```
+
+## Web client
+
+The plugin carries a build of Hermie's browser client in `dashboard/app/`. The
+plugin itself does not serve it: the dashboard serves every plugin's
+`dashboard/` folder through its own static route, and this is a folder in it. So
+there is no new listener and no new route, and the files sit behind the
+dashboard's own sign-in like the rest of it.
+
+```
+https://<gateway>/dashboard-plugins/hermie/app/index.html
+```
+
+What is served: `index.html`, the hashed files under `assets/`, and
+`build.json`; later builds add `manifest.json`, `icons/*`, `licenses.json` and a
+service worker `sw.js`. The route serves only the extensions on the dashboard's
+allow-list (`.js .mjs .css .json .html .svg .png .jpg .jpeg .gif .webp .ico
+.woff2 .woff .ttf .otf .map`), never this plugin's Python, and answers
+`Cache-Control: no-store` for each file.
+
+Who gets them:
+
+| Caller | Gated gateway (sign-in on) | Ungated gateway |
+|---|---|---|
+| Not signed in | `302 /login?next=…` for every file | the static files, the same exposure as the dashboard's own bundle; every `/api/*` call the client makes still needs the session token |
+| Signed in | the file, `Cache-Control: no-store` | the file |
+
+The client holds no credential of its own. On a gated gateway it uses the
+dashboard's own `HttpOnly` cookie session and its sign-in page; every API call it
+makes is checked by the gateway, exactly as the dashboard's are.
+
+**It runs on the same origin as the dashboard, and that is the central fact
+about it.** A script-injection bug in the client would act with the signed-in
+person's session against every `/api/*` route of the gateway: its configuration,
+its files, its terminal, every profile. That is operator access to the gateway
+host. The client is built to leave no path for it (no raw HTML from bot output,
+a content security policy in its document, no remote images), and `SECURITY.md`
+says what is and is not claimed.
+
+### The integrity check
+
+`dashboard/app/build.json` names the app repository and the 40-character commit
+the build was made from, the client version, and the size and SHA-256 of every
+file. When the gateway loads the plugin, it checks the folder against it, once:
+every listed file present with exactly that size and hash, nothing unlisted,
+nothing outside `app/`, no symbolic link, no extension the dashboard would not
+serve. The check gives up after 200 files or 8 MB, and it never runs on a hook.
+
+Only when it passes does the advert carry the capability `web.client` and a
+block that says where the client is:
+
+```json
+"web": {
+  "path": "/dashboard-plugins/hermie/app/index.html",
+  "version": "0.2.0",
+  "commit": "125f64dbdffe",
+  "files": 6,
+  "bytes": 495964
+}
+```
+
+When it fails, both are left out and the gateway's log has one warning naming how
+many files differ. A plugin tree without `dashboard/app/` (an older checkout, a
+partial clone) loads as usual and advertises no client.
+
+In CI, `web-bundle-verify` goes further: it checks the app repository out at the
+commit `build.json` names, requires that commit to be on the app's `main`,
+rebuilds the client and compares every byte. A bundle that is not the build of
+reviewed, merged source cannot be merged here.
+
+### `modules.web: false`
+
+Withdraws the advert: no `web.client`, no `web` block, `modules.web: "off"`, and
+the files are not checked at all. The apps read that as "this gateway does not
+offer the web client", and the client is meant to decline to run when it reads
+`off` there.
+
+It does **not** remove or block the files. The dashboard serves whatever is in
+the plugin's `dashboard/` folder to whoever it lets in, and this switch is not
+part of that decision. It is a courtesy, not a boundary. To make the files
+unreachable, uninstall or disable the plugin, or delete `dashboard/app/` from the
+installed tree (an update puts it back).
 
 ## Updating
 

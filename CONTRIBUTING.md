@@ -49,8 +49,8 @@ the report on every update. `scripts/guard_scan.py` runs that scan, with the two
 functions the update path calls (`tools.plugin_guard.scan_plugin` and
 `should_allow_plugin_install`), and `guard-scan` in CI fails on anything but
 `safe`. It scans the checkout as an install would see it: every file except
-`.git`, caches and virtual environments, so the tests, the docs, the workflows and
-the scripts are all in it.
+`.git`, caches and virtual environments, so the tests, the docs, the workflows,
+the scripts and the web client bundle in `dashboard/app/` are all in it.
 
 It needs no Hermes install. The scanner is a few standard-library modules under
 `tools/` in the Hermes repository, so the script fetches only that directory (a
@@ -88,6 +88,42 @@ request that changes nothing else. `guard-scan` runs against the new scanner on
 that pull request, and its report is the review. When the daily run turns red
 and the pinned one is green, a newer scanner has a stricter rule: fix the tree
 first, then move the pin.
+
+## Importing a web client build
+
+`dashboard/app/` is generated: a build of the app repository's `native/web`,
+copied in by a script, never edited by hand. To import one:
+
+```
+# in the app repository, at a commit that is on its main
+git switch --detach <commit on main>
+npm ci && npm run client:build              # writes native/web/dist/ and dist/build.json
+
+# here, on a branch of its own
+python scripts/import_web_client.py --dist <app repo>/native/web/dist
+```
+
+The script checks the build with the plugin's own load-time rules (`web.py`) and
+the import limits (900 kB per file, 3 MB and 80 files in all, ASCII text, no
+source maps, a canonical `build.json`), replaces `dashboard/app/` through a
+temporary folder and a rename, and prints `version`, `commit`, `files` and
+`bytes`. It makes no network request and commits nothing. Paste its output into
+the pull request, bump the version (see "Releasing"), add a changelog entry
+naming the client build, and fill in the bundle checklist in the pull request
+template. `python scripts/import_web_client.py --check` checks the folder in
+place and changes nothing.
+
+Before you push, run the scanner over the tree with the bundle in it
+(`python scripts/guard_scan.py`): the client's text (its English strings
+included) is scanned like every other file, and a phrase the scanner reads as a
+prompt injection turns the verdict to `caution`. Such a phrase is fixed in the
+app repository and the build imported again; the bundle here is never edited.
+
+What `web-bundle-verify` does in CI, you can do by hand: clone the app
+repository, check out the commit `build.json` names, confirm
+`git merge-base --is-ancestor <commit> origin/main`, run `npm ci && npm run
+client:build` with the Node version in its `.nvmrc`, and
+`diff -r native/web/dist <this repo>/dashboard/app`. No output is a pass.
 
 ## Validating against a real Hermes
 
@@ -140,13 +176,14 @@ rather than the files that moved.
 so a release here is a version bump on code that is already live, not a
 shipping step. Cutting one:
 
-1. Bump the version in both places it lives: `version` in `plugin.yaml` and
-   `PLUGIN_VERSION` in `contract.py`. They must always agree.
+1. Bump the version in the three places it lives: `version` in `plugin.yaml`,
+   `PLUGIN_VERSION` in `contract.py` and `version` in `dashboard/manifest.json`.
+   They must always agree; a test checks it.
 2. Give `CHANGELOG.md` a real section for the new version, dated the day of
    the release (`## 0.8.2 — 2026-10-01`), above the previous one. Move each
    `Unreleased` entry that is going out under it, grouped under `### Added`,
    `### Changed`, `### Fixed` as it already is.
-3. Commit only those two version fields plus the changelog, as its own
+3. Commit only those version fields plus the changelog, as its own
    commit: `chore(release): <version>`.
 4. Tag that commit as an annotated tag: `git tag -a v<version> -m "Hermie
    plugin <version>"`.

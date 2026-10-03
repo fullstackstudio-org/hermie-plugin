@@ -8,6 +8,26 @@ people.
 
 ### Added
 
+- **`web.client`: the plugin carries Hermie's web client.** A build of the browser client sits in
+  `dashboard/app/`, and the dashboard serves it from its own static route at
+  `/dashboard-plugins/hermie/app/index.html`, behind its own sign-in. The plugin adds no listener and
+  no route for it. At load the plugin checks the folder once against the build's own `build.json`
+  (every file's size and SHA-256; nothing unlisted, linked, outside the folder or of an extension the
+  dashboard would not serve; at most 200 files and 8 MB) and only then advertises the capability
+  `web.client` and an advert block `web` with the client's path, version, commit, file count and
+  size. A folder that does not match is logged once as a warning and not advertised; a tree without
+  one loads as before. The first build imported is web client 0.2.0 from app commit `125f64dbdffe`,
+  the boot screens only.
+- **`modules.web`**, on by default. Off withdraws the advert and skips the check. It does not remove
+  or block the files: the dashboard serves them to whoever it lets in either way.
+- **`scripts/import_web_client.py`** puts a client build into `dashboard/app/`, after the same
+  check and the import limits (900 kB per file, 3 MB and 80 files in all, ASCII text, no source
+  maps), and prints what it imported. It commits nothing and makes no network request.
+- **`web-bundle-verify` is the real check now.** It rebuilds the commit `build.json` names, which
+  must be on the app repository's `main`, with the Node version the app pins, and compares every
+  byte with `dashboard/app/`, `build.json` included. It replaces the placeholder that refused any
+  bundle.
+
 - **Continuous integration.** Pull requests and pushes to `main` run the tests and the Hermes plugin
   scanner (the fork's and upstream's, each at a pinned commit) and must pass before a merge once branch
   protection is set; a daily run asks the same of the newest scanners. The workflows need no secret and
@@ -51,6 +71,8 @@ people.
 
 ### Changed
 
+- **The dashboard manifest's `version` follows the plugin's** (it said `0.5.0`), and the manifest
+  still hides the tab: the plugin has no dashboard page of its own.
 - **A notification is titled with the bot's display name.** Where the profile has a `display_name`
   (the label `PATCH /api/plugins/hermie/profiles/{name}` sets), every transport shows it as the
   title instead of the profile name. `data.bot` is still the profile name, which is what a tap is
