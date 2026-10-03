@@ -41,16 +41,32 @@ called `__init__`.
 
 ## The scanner gate
 
-Hermes scans a plugin's whole tree when it is installed, and again after every
-`hermes plugins update`. A `dangerous` verdict (any critical finding) blocks the
-install and, after an update, **switches the plugin off** on that gateway. A
-`caution` verdict (any high finding) asks for confirmation at install and prints
-the report on every update. `scripts/guard_scan.py` runs that scan, with the two
-functions the update path calls (`tools.plugin_guard.scan_plugin` and
-`should_allow_plugin_install`), and `guard-scan` in CI fails on anything but
-`safe`. It scans the checkout as an install would see it: every file except
-`.git`, caches and virtual environments, so the tests, the docs, the workflows,
-the scripts and the web client bundle in `dashboard/app/` are all in it.
+Hermes scans a plugin's whole tree when it is installed, and scans the new
+version before every `hermes plugins update` applies it. A `dangerous` verdict
+(any critical finding) blocks the install, and **refuses the update**: the gateway
+keeps running the old version, and the auto-update timer stops there. A `caution`
+verdict (any high finding) needs a person to confirm, at install and at update;
+the timer has no person, so for it a `caution` is a refused update too.
+`scripts/guard_scan.py` runs that scan, with the two functions the update path
+calls (`tools.plugin_guard.scan_plugin` and `should_allow_plugin_install`). It
+scans the checkout as an install would see it: every file except `.git`, caches
+and virtual environments, so the tests, the docs, the workflows, the scripts and
+the web client bundle in `dashboard/app/` are all in it.
+
+Two scanners run, and each has a `gate` in `.github/scanner-pins.json` (the web
+client plan's W3, amended for HERM-192):
+
+- the **fork**, which is what the gateways run, is `blocking`: `guard-scan` fails
+  on anything but `safe`;
+- **upstream**, which the fork tracks, is `informational`: its verdict and
+  findings are in the report and the step summary (and go into an import pull
+  request and the changelog), and only `dangerous`, a verdict the script does not
+  know, or a scanner that could not run fails the job. Upstream reads the web
+  client's minified JavaScript line by line, so its `caution` on the bundle (the
+  protocol's `sudo` prompt name) is expected.
+
+The app repository's `scripts/web/guard-scan.mjs` applies the same rules to the
+same two pins before a bundle is imported.
 
 It needs no Hermes install. The scanner is a few standard-library modules under
 `tools/` in the Hermes repository, so the script fetches only that directory (a
@@ -64,8 +80,12 @@ Run it yourself:
 ```
 python scripts/guard_scan.py                          # the pinned scanners, as CI does
 python scripts/guard_scan.py --latest                 # their newest branches, as the daily run does
-python scripts/guard_scan.py --scanner-root fork=/path/to/hermes-agent   # a checkout you already have
+python scripts/guard_scan.py --scanner-root fork=/path/to/hermes-agent   # a checkout in place of the fork pin
+python scripts/guard_scan.py --scanner-root fork=/path/to/hermes-agent --only-roots   # that checkout alone
 ```
+
+`--scanner-root` keeps the gate of the pin it replaces; both options are refused
+when `GITHUB_ACTIONS` is set, because in CI the pins decide.
 
 Read the report the way an operator would: `HIGH` and `CRITICAL` are what the
 gate is about, `MEDIUM` and `LOW` are listed and do not fail it. The test

@@ -1,15 +1,17 @@
 {
-  "comment": "Which copies of the Hermes plugin scanner scripts/guard_scan.py runs. Each is fetched at the commit named here, so a CI run is reproducible; the scheduled run fetches the branch named under latest instead. The gateways run the fork; upstream is scanned as well because the fork tracks it. To move a pin, change the commit in a pull request of its own and read the scanner's report on that run. CONTRIBUTING.md says how.",
+  "comment": "Which copies of the Hermes plugin scanner scripts/guard_scan.py runs. Each is fetched at the commit named here, so a CI run is reproducible; the scheduled run fetches the branch named under latest instead. The gate decides what a verdict means (the web client plan's W3, amended for HERM-192): the fork, which is what the gateways run at install and update, is blocking and passes only on safe; upstream, which the fork tracks, is informational: it runs, its verdict and findings are reported, and only dangerous from it fails. The app repository pins the same two commits in scripts/web/scanner-pins.json. To move a pin, change the commit in a pull request of its own and read the scanner's report on that run. CONTRIBUTING.md says how.",
   "scanners": {
     "fork": {
       "repo": "https://github.com/fullstackstudio-org/hermes-agent.git",
-      "commit": "9cfa68a1aea8cedb521588a9c9ddef02676420d0",
-      "latest": "main"
+      "commit": "ff419bb82a1ccd6e9ece5684c175c06ccf0be023",
+      "latest": "main",
+      "gate": "blocking"
     },
     "upstream": {
       "repo": "https://github.com/NousResearch/hermes-agent.git",
       "commit": "5fe12f373ea65c1601db678c7841168d6394382b",
-      "latest": "main"
+      "latest": "main",
+      "gate": "informational"
     }
   }
 }
