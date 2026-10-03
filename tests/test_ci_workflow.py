@@ -126,42 +126,195 @@ def test_the_nightly_run_follows_the_newest_scanners_and_cannot_hold_a_merge():
     assert any("--latest" in c for c in commands)
 
 
-def test_the_bundle_placeholder_has_its_final_name_and_says_in_its_step_that_it_is_one():
-    job = load(GITHUB / "workflows" / "ci.yml")["jobs"]["web-bundle-verify"]
+APP_REPO = "fullstackstudio-org/hermie"
+
+
+def bundle_job():
+    return load(GITHUB / "workflows" / "ci.yml")["jobs"]["web-bundle-verify"]
+
+
+def bundle_step(job, needle):
+    """The one step of the bundle job whose name contains `needle`, with its index."""
+    found = [(i, s) for i, s in enumerate(job["steps"]) if needle in s.get("name", "")]
+    assert len(found) == 1, needle
+    return found[0]
+
+
+def test_the_bundle_job_keeps_the_name_branch_protection_requires():
+    job = bundle_job()
 
     assert job["name"] == "web-bundle-verify"
-    named = [s["name"] for s in job["steps"] if "run" in s]
-    assert any("Placeholder" in n and "not yet active" in n for n in named)
+    assert not any("Placeholder" in s.get("name", "") for s in job["steps"])
 
 
-def test_the_bundle_placeholder_refuses_a_bundle_even_as_a_dangling_symlink():
-    job = load(GITHUB / "workflows" / "ci.yml")["jobs"]["web-bundle-verify"]
-    script = " ".join(s.get("run", "") for s in job["steps"])
+def test_the_bundle_job_trusts_no_source_build_json_names_but_one():
+    """build.json is written by the pull request, so its `sourceRepo` is an input.
 
-    assert "[ -e dashboard/app ] || [ -L dashboard/app ]" in script and "exit 1" in script
+    A bundle naming a repository of its author's choosing would pass by rebuilding
+    itself; the app repository is fixed in the job and the named one compared with it.
+    """
+    job = bundle_job()
+    _, source = bundle_step(job, "read its source")
+    checkouts = [s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+    app = next(s for s in checkouts if s["with"].get("path") == "app")
+
+    assert job["env"]["APP_REPO"] == APP_REPO
+    assert '[ "$repo" != "$APP_REPO" ]' in source["run"]
+    assert app["with"]["repository"] == "${{ env.APP_REPO }}"
+    assert app["with"]["ref"] == "${{ steps.source.outputs.commit }}"
+    assert "token" not in app["with"], "a public repository needs no credential of ours"
+    assert app["with"]["persist-credentials"] is False
 
 
-def test_the_bundle_placeholder_really_fails_on_a_bundle_and_on_a_dangling_symlink(tmp_path):
+def test_the_bundle_job_puts_no_value_from_build_json_into_a_script():
+    """Values reach a script through `env`, never through `${{ }}` in its text."""
+    for step in bundle_job()["steps"]:
+        assert "${{" not in step.get("run", ""), step.get("name")
+
+
+def test_the_bundle_job_refuses_unmerged_source_before_it_builds_anything():
+    job = bundle_job()
+    ancestry_at, ancestry = bundle_step(job, "not on the app's main")
+    build_at, build = bundle_step(job, "Rebuild")
+    node_at = next(i for i, s in enumerate(job["steps"]) if s.get("uses", "").startswith("actions/setup-node@"))
+
+    assert "git fetch" in ancestry["run"] and "refs/heads/main" in ancestry["run"]
+    assert "merge-base --is-ancestor" in ancestry["run"]
+    assert ancestry["run"].index("git fetch") < ancestry["run"].index("merge-base")
+    assert ancestry_at < node_at < build_at
+    assert "npm ci" in build["run"] and "npm run client:build" in build["run"]
+
+
+def test_the_bundle_job_builds_with_the_node_the_app_pins_and_no_cache():
+    node = next(s for s in bundle_job()["steps"] if s.get("uses", "").startswith("actions/setup-node@"))
+
+    assert node["with"]["node-version-file"] == "app/.nvmrc"
+    assert node["with"]["package-manager-cache"] is False
+    assert "node-version" not in node["with"]
+
+
+def test_the_bundle_job_compares_every_file_build_json_included():
+    _, compare = bundle_step(bundle_job(), "Compare")
+
+    assert "diff -r" in compare["run"] and "--no-dereference" in compare["run"]
+    assert "app/native/web/dist plugin/dashboard/app" in compare["run"]
+    assert "--exclude" not in compare["run"] and "-x " not in compare["run"]
+
+
+def test_every_bundle_step_after_the_source_runs_only_when_there_is_a_bundle():
+    steps = bundle_job()["steps"]
+    source_at, _ = bundle_step(bundle_job(), "read its source")
+
+    for step in steps[source_at + 1 :]:
+        assert step["if"] == "steps.source.outputs.present == 'true'", step.get("name", step.get("uses"))
+
+
+def _plugin_tree(tmp_path):
+    """The two files the source step runs, in a tree of their own."""
+    import shutil
+
+    tree = tmp_path / "plugin"
+    (tree / "scripts").mkdir(parents=True)
+    (tree / "dashboard").mkdir()
+    shutil.copy(GITHUB.parent / "web.py", tree / "web.py")
+    shutil.copy(GITHUB.parent / "scripts" / "import_web_client.py", tree / "scripts" / "import_web_client.py")
+    return tree
+
+
+def _write_bundle(app, repo=APP_REPO, commit="ab" * 20):
+    import hashlib
+    import json
+
+    files = {"index.html": b"<!doctype html>\n"}
+    app.mkdir(parents=True)
+    (app / "index.html").write_bytes(files["index.html"])
+    manifest = {
+        "v": 1,
+        "name": "hermie-web-client",
+        "version": "0.2.0",
+        "sourceRepo": repo,
+        "sourceCommit": commit,
+        "files": {n: {"sha256": hashlib.sha256(d).hexdigest(), "bytes": len(d)} for n, d in files.items()},
+        "totalBytes": sum(len(d) for d in files.values()),
+    }
+    (app / "build.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+def _run_step(script, cwd, tmp_path, **env):
     import os
     import subprocess
 
-    script = next(s["run"] for s in load(GITHUB / "workflows" / "ci.yml")["jobs"]["web-bundle-verify"]["steps"] if "run" in s)
+    output = tmp_path / "github_output"
+    output.write_text("")
+    environment = {**os.environ, "GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(tmp_path), **env}
+    done = subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=cwd, env=environment, capture_output=True, text=True)
+    return done.returncode, output.read_text(), done.stdout + done.stderr
 
-    def run(tree):
-        return subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=tree, capture_output=True, text=True).returncode
 
-    clean = tmp_path / "clean"
-    clean.mkdir()
-    assert run(clean) == 0
+def test_the_source_step_really_reads_a_bundle_and_refuses_a_foreign_or_damaged_one(tmp_path):
+    import os
 
-    folder = tmp_path / "folder"
-    (folder / "dashboard" / "app").mkdir(parents=True)
-    assert run(folder) == 1
+    job = bundle_job()
+    _, source = bundle_step(job, "read its source")
+    env = {"APP_REPO": job["env"]["APP_REPO"]}
 
-    dangling = tmp_path / "dangling"
-    (dangling / "dashboard").mkdir(parents=True)
+    none = _plugin_tree(tmp_path / "none")
+    assert _run_step(source["run"], none, tmp_path, **env)[:2] == (0, "present=false\n")
+
+    good = _plugin_tree(tmp_path / "good")
+    _write_bundle(good / "dashboard" / "app")
+    code, output, _ = _run_step(source["run"], good, tmp_path, **env)
+    assert (code, output) == (0, "present=true\ncommit=" + "ab" * 20 + "\n")
+
+    foreign = _plugin_tree(tmp_path / "foreign")
+    _write_bundle(foreign / "dashboard" / "app", repo="someone-else/hermie")
+    code, output, log = _run_step(source["run"], foreign, tmp_path, **env)
+    assert code == 1 and "present=true" not in output and "must be built from" in log
+
+    damaged = _plugin_tree(tmp_path / "damaged")
+    _write_bundle(damaged / "dashboard" / "app")
+    (damaged / "dashboard" / "app" / "index.html").write_bytes(b"<!doctype html>\r")
+    assert _run_step(source["run"], damaged, tmp_path, **env)[0] == 1
+
+    dangling = _plugin_tree(tmp_path / "dangling")
     os.symlink(tmp_path / "nowhere", dangling / "dashboard" / "app")
-    assert run(dangling) == 1
+    assert _run_step(source["run"], dangling, tmp_path, **env)[0] == 1
+
+
+def test_the_ancestry_step_really_refuses_a_commit_that_is_not_on_main(tmp_path):
+    """Against a local stand-in for the app repository: one commit on main, one beside it."""
+    import subprocess
+
+    def git(*args, cwd):
+        return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    origin = tmp_path / "origin.git"
+    git("init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+    work = tmp_path / "work"
+    git("clone", "-q", str(origin), str(work), cwd=tmp_path)
+    for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false")):
+        git("config", key, value, cwd=work)
+    git("commit", "-q", "--allow-empty", "-m", "on main", cwd=work)
+    git("push", "-q", "origin", "HEAD:main", cwd=work)
+    merged = git("rev-parse", "HEAD", cwd=work)
+    git("commit", "-q", "--allow-empty", "-m", "beside main", cwd=work)
+    git("push", "-q", "origin", "HEAD:refs/heads/side", cwd=work)
+    unmerged = git("rev-parse", "HEAD", cwd=work)
+
+    _, ancestry = bundle_step(bundle_job(), "not on the app's main")
+
+    app = tmp_path / "app"
+    git("clone", "-q", str(origin), str(app), cwd=tmp_path)
+    git("checkout", "-q", "--detach", merged, cwd=app)
+    code, _, log = _run_step(ancestry["run"], app, tmp_path, COMMIT=merged, APP_REPO=APP_REPO)
+    assert code == 0, log
+
+    git("checkout", "-q", "--detach", unmerged, cwd=app)
+    code, _, log = _run_step(ancestry["run"], app, tmp_path, COMMIT=unmerged, APP_REPO=APP_REPO)
+    assert code == 1 and "not on the main branch" in log
+
+    code, _, log = _run_step(ancestry["run"], app, tmp_path, COMMIT=merged, APP_REPO=APP_REPO)
+    assert code == 1 and "not at" in log, "the checkout must be at the commit build.json names"
 
 
 def test_the_readme_lists_every_job_of_ci_as_a_required_check():
