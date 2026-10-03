@@ -3,8 +3,8 @@ name: CI
 # `main` deploys itself to the gateways within about fifteen minutes of a push, so
 # this runs before a change is merged (pull_request) and again on what landed
 # (push). Branch protection is what makes "before" binding: see README.md,
-# "Branch protection". The required checks are the job names `test` and
-# `guard-scan`.
+# "Branch protection". The required checks are the job names `test`,
+# `guard-scan` and `web-bundle-verify`.
 #
 # Needs no secret and asks for none. It runs on GitHub-hosted runners (the
 # organisation's self-hosted runner serves private repositories only) and on
@@ -98,31 +98,114 @@ jobs:
       - name: Scan the tree with the pinned scanners
         run: python scripts/guard_scan.py --workdir "$RUNNER_TEMP/scanners"
 
-  # PLACEHOLDER, NOT YET ACTIVE. The real job lands with the web client's bundle
-  # (the plan's P-2): it checks the app repository out at the commit
-  # `dashboard/app/build.json` names, requires that commit to be an ancestor of the
-  # app's main, rebuilds the client and compares every byte with `dashboard/app/`.
-  # Until then it verifies nothing about a bundle. It is a required check anyway,
-  # under the name it will keep, because the one thing true today is worth
-  # enforcing: it refuses a bundle that arrives before the verification exists, so
-  # an unverified build cannot be merged by accident. Its name stays exactly
-  # `web-bundle-verify` so that branch protection need not change when the real
-  # job replaces this one.
+  # The web client in dashboard/app/ is the build of reviewed, merged source, byte
+  # for byte. The job checks the bundle against its own build.json (the rules the
+  # plugin applies at load, plus the import limits), checks the app repository out
+  # at the commit build.json names, refuses that commit unless it is on the app's
+  # main, rebuilds the client there with the Node version the app pins, and
+  # compares every file of the rebuild, build.json included, with dashboard/app/.
+  # A bundle that is not exactly the build of merged source cannot pass.
+  #
+  # With no dashboard/app/ at all there is nothing to verify and the job passes:
+  # a plugin without a client is a valid plugin. Its name stays exactly
+  # `web-bundle-verify`; branch protection requires it under that name.
   web-bundle-verify:
     name: web-bundle-verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
+    env:
+      # The one repository a bundle may be built from. A pull request writes
+      # build.json, so the source it names is compared with this rather than
+      # trusted: a bundle naming a repository of its author's choosing would
+      # otherwise pass by rebuilding itself.
+      APP_REPO: fullstackstudio-org/hermie
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: plugin
           persist-credentials: false
 
-      - name: "Placeholder, not yet active: refuse a client bundle until it can be verified"
+      - name: Check the bundle against its build.json and read its source
+        id: source
+        working-directory: plugin
         shell: bash
         run: |
-          # -L as well as -e: a dangling symlink is not "existing" to -e.
-          if [ -e dashboard/app ] || [ -L dashboard/app ]; then
-            echo "::error::dashboard/app exists, but the job that rebuilds and verifies a bundle is not implemented yet. Do not merge a bundle without it."
+          python3 scripts/import_web_client.py --check > "$RUNNER_TEMP/bundle.txt"
+          cat "$RUNNER_TEMP/bundle.txt"
+          if [ "$(sed -n 's/^present=//p' "$RUNNER_TEMP/bundle.txt")" != "true" ]; then
+            echo "::notice::There is no dashboard/app/, so there is no client bundle to verify."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          repo=$(sed -n 's/^repo=//p' "$RUNNER_TEMP/bundle.txt")
+          commit=$(sed -n 's/^commit=//p' "$RUNNER_TEMP/bundle.txt")
+          if [ "$repo" != "$APP_REPO" ]; then
+            echo "::error::build.json names $repo as its source. A bundle must be built from $APP_REPO."
             exit 1
           fi
-          echo "::notice::web-bundle-verify is a placeholder. No client bundle is present, and none is verified by this job yet."
+          if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::build.json names no full source commit."
+            exit 1
+          fi
+          { echo "present=true"; echo "commit=$commit"; } >> "$GITHUB_OUTPUT"
+
+      # The app repository is public: the checkout needs no credential beyond the
+      # job's own read-only one, and keeps none in the workspace.
+      - name: Check the app repository out at that commit
+        if: steps.source.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.APP_REPO }}
+          ref: ${{ steps.source.outputs.commit }}
+          path: app
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Refuse a commit that is not on the app's main
+        if: steps.source.outputs.present == 'true'
+        working-directory: app
+        shell: bash
+        env:
+          COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          git fetch --no-tags --filter=blob:none origin +refs/heads/main:refs/remotes/origin/main
+          if [ "$(git rev-parse HEAD)" != "$COMMIT" ]; then
+            echo "::error::The checkout is not at $COMMIT."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$COMMIT" refs/remotes/origin/main; then
+            echo "::error::$COMMIT is not on the main branch of $APP_REPO. A bundle is built only from merged source."
+            exit 1
+          fi
+          echo "$COMMIT is on the main branch of $APP_REPO."
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.source.outputs.present == 'true'
+        with:
+          node-version-file: app/.nvmrc
+          package-manager-cache: false
+
+      - name: Rebuild the client from that commit
+        if: steps.source.outputs.present == 'true'
+        working-directory: app
+        shell: bash
+        run: |
+          node --version
+          npm ci --no-audit --no-fund
+          npm run client:build
+
+      - name: Compare the rebuild with dashboard/app, file by file
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: |
+          if diff -r -q --no-dereference app/native/web/dist plugin/dashboard/app; then
+            echo "dashboard/app is the build of that commit, byte for byte."
+            exit 0
+          fi
+          echo "::error::dashboard/app is not the build of the commit its build.json names."
+          for side in app/native/web/dist plugin/dashboard/app; do
+            echo "--- $side"
+            (cd "$side" && find . -type f -print0 | sort -z | xargs -0 sha256sum)
+          done
+          exit 1
