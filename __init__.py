@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 
 __version__ = contract.PLUGIN_VERSION
 
-# Modules that ship. `push` and `context` are on unless told otherwise; the rest
-# are named in contract.PLANNED_MODULES and load nothing.
-IMPLEMENTED = ("push", "context", "memory")
+# Modules that ship, each on unless told otherwise; the rest are named in
+# contract.PLANNED_MODULES and load nothing. `web` is the client build in
+# `dashboard/app/`: on means it is checked at load and advertised when intact.
+IMPLEMENTED = ("push", "context", "memory", "web")
 
 
 class Runtime:
@@ -178,6 +179,7 @@ def publish(
     installed_ref: str = "",
     latest: str = "",
     relay_origins: Optional[List[str]] = None,
+    web: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Tell the app what this gateway can do.
 
@@ -196,6 +198,7 @@ def publish(
             installed_ref=installed_ref,
             latest=latest,
             relay_origins=relay_origins,
+            web=web,
         )
         uimeta.write_key(uimeta.PLUGIN_KEY, value, runtime.home)
         return int(value["updatedAt"])
@@ -239,11 +242,22 @@ def register(ctx: Any) -> None:
 
         capabilities.extend(memory_module.register(ctx, runtime).capabilities())
 
+    # The bundled web client: hashed once, here, and never on a hook path. The
+    # block and the capability travel together, and only when every file
+    # matched its manifest. See web.py.
+    web_block: Optional[Dict[str, Any]] = None
+    if states.get("web") == "on":
+        from . import web as web_module
+
+        web = web_module.register(ctx, runtime)
+        capabilities.extend(web.capabilities())
+        web_block = web.advert_block()
+
     installed_ref, latest = update_fields(runtime)
     if latest:
         capabilities.append(contract.CAP_UPDATE_CHECK)
 
-    stamp = publish(runtime, states, capabilities, installed_ref, latest, relay_origins)
+    stamp = publish(runtime, states, capabilities, installed_ref, latest, relay_origins, web_block)
 
     # An advert that outlives the plugin is a lie the app would act on, so the
     # key is removed on unload. A gateway that is killed rather than unloaded
