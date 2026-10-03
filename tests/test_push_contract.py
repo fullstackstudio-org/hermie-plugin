@@ -25,10 +25,9 @@ from hermie_plugin.push.cron import BY_TASK_ID, Cron
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "push_contract.json"
 CONTRACT = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
-# Fields the data bag carries that the contract's field list does not describe:
-# the envelope (shape version, the second, the dedupe id) that every sender has
-# always put on the wire. `preview` is the opt-in text, checked separately.
-ENVELOPE = {"v", "at", "eventId"}
+# Fields the data bag carries that the contract's field list does not describe.
+# `preview` is the opt-in text, checked separately.
+ENVELOPE = set()
 
 
 def app_repo_contract():
@@ -64,9 +63,11 @@ def conformance_problems(data, *, allow_missing=()):
     fields = {field["key"]: field for field in CONTRACT["data"]["fields"]}
     for key, field in fields.items():
         required = field.get("required") is True
-        when = field.get("requiredWhen")
-        if when and all(data.get(name) == value for name, value in when.items()):
-            required = True
+        # `requiredWhen` is one condition; `alsoRequiredWhen` is more of them,
+        # added beside it so the one a reader already understands is unchanged.
+        for when in [field.get("requiredWhen"), *field.get("alsoRequiredWhen", [])]:
+            if when and all(data.get(name) == value for name, value in when.items()):
+                required = True
         if key not in data:
             if required and key not in allow_missing:
                 problems.append(f"{key} is required")
@@ -75,8 +76,10 @@ def conformance_problems(data, *, allow_missing=()):
         if value is None or value == "":
             problems.append(f"{key} is sent empty; optional fields are omitted instead")
             continue
-        expected = {"string": str, "boolean": bool}[field["type"]]
-        if not isinstance(value, expected):
+        expected = {"string": str, "boolean": bool, "number": (int, float)}[field["type"]]
+        if isinstance(value, bool) and field["type"] == "number":
+            problems.append(f"{key} is a boolean, not a number")
+        elif not isinstance(value, expected):
             problems.append(f"{key} is {type(value).__name__}, not {field['type']}")
         if "enum" in field and value not in field["enum"]:
             problems.append(f"{key}={value!r} is not one of {field['enum']}")
@@ -137,9 +140,45 @@ def test_every_payload_conforms(name):
     assert conformance_problems(data) == []
 
 
-def test_a_clarify_question_carries_no_request_id_because_none_is_known():
-    """Its id is minted inside the gateway's blocking prompt, out of a hook's sight."""
+def test_a_clarify_seen_through_the_tool_hook_carries_no_request_id():
+    """Its id is minted inside the gateway's blocking prompt, out of that hook's sight."""
     assert "requestId" not in full_payload(every_notification()["clarify"])
+
+
+@pytest.mark.parametrize("example", CONTRACT["examples"]["list"], ids=lambda entry: entry["name"])
+def test_every_example_in_the_contract_conforms_to_its_own_field_list(example):
+    """The file's examples are held to the file's rules, whoever reads them."""
+    data = example["data"]
+    assert conformance_problems(data) == []
+    # The category rule, and the per-method table that spells it out.
+    methods = {entry["method"]: entry for entry in CONTRACT["requests"]["methods"]}
+    wants_actions = data.get("type") == "request" and not data.get("clear") and (
+        methods[data["method"]]["actions"] if data.get("method") in methods else False
+    )
+    assert ("category" in example) == bool(wants_actions)
+    if data.get("method") in CONTRACT["category"]["notFor"]["methods"]:
+        assert "category" not in example
+    # A method that must never carry text carries none, with previews on or off.
+    if data.get("method") in methods and not methods[data["method"]]["preview"]:
+        assert "preview" not in data
+    assert example.get("silent", False) == bool(data.get("clear"))
+
+
+def test_the_methods_table_names_every_method_the_plugin_raises():
+    assert [entry["method"] for entry in CONTRACT["requests"]["methods"]] == list(events.REQUEST_METHODS)
+    field = next(f for f in CONTRACT["data"]["fields"] if f["key"] == "method")
+    assert field["enum"] == list(events.REQUEST_METHODS)
+    assert CONTRACT["category"]["notFor"]["methods"] == [
+        method for method in events.REQUEST_METHODS if method != "approval"
+    ]
+
+
+def test_the_unfiltered_types_are_the_plugins_and_not_switches():
+    assert list(CONTRACT["unfilteredTypes"].keys() - {"$comment"}) == list(events.UNFILTERED_TYPES)
+    assert not set(events.UNFILTERED_TYPES) & set(CONTRACT["types"])
+    assert next(f for f in CONTRACT["data"]["fields"] if f["key"] == "type")["enum"] == list(events.PAYLOAD_TYPES)
+    assert CONTRACT["clear"]["reasons"] == list(events.CLEAR_REASONS)
+    assert [c["id"] for c in CONTRACT["android"]["alsoChannels"]] == list(events.UNFILTERED_TYPES)
 
 
 def test_an_approval_without_a_session_drops_the_session_and_keeps_the_rest():
@@ -289,7 +328,10 @@ def service_worker_shows(payload):
             "data": data,
             "tag": tag,
             "requireInteraction": needs_input,
-            "actions": [{"action": "allow", "title": "Allow"}, {"action": "deny", "title": "Deny"}]
+            "actions": [
+                {"action": "hermie.request.allow", "title": "Allow"},
+                {"action": "hermie.request.deny", "title": "Deny"},
+            ]
             if needs_input
             else [],
         },
@@ -306,16 +348,24 @@ def test_the_service_worker_turns_an_approval_into_a_notification_with_buttons(t
 
     assert shown["title"] == "scout"
     assert shown["options"]["body"] == "Needs your approval"
-    assert shown["options"]["tag"] == "hermie:scout:s1"
+    # The worker tags by `sessionId`, and an approval no longer carries one: the
+    # hook names the conversation by its stored key, which is not the runtime
+    # id the app compares, so it travels as `sessionKey` and this worker, which
+    # does not read that, tags the approval by the bot alone.
+    assert shown["options"]["tag"] == "hermie:scout"
     assert shown["options"]["requireInteraction"] is True
-    assert [action["action"] for action in shown["options"]["actions"]] == ["allow", "deny"]
+    assert [action["action"] for action in shown["options"]["actions"]] == [
+        "hermie.request.allow",
+        "hermie.request.deny",
+    ]
 
-    tap = service_worker_tap(shown, "allow")
-    assert tap["actionIdentifier"] == "allow"
+    tap = service_worker_tap(shown, "hermie.request.allow")
+    assert tap["actionIdentifier"] == "hermie.request.allow"
     # What the app's `pushTapOf` reads to answer: the bot and the request.
     assert tap["data"]["bot"] == "scout"
     assert tap["data"]["requestId"] == "r1"
-    assert tap["data"]["sessionId"] == "s1"
+    assert "sessionId" not in tap["data"]
+    assert tap["data"]["sessionKey"] == "s1"
 
 
 def test_the_flat_payload_this_plugin_used_to_send_opened_nothing():
@@ -378,13 +428,13 @@ def test_the_real_service_worker_agrees_with_the_port(tmp_path, monkeypatch):
         pytest.skip("needs the app repository checked out next to this one, and Node")
     sent = web_push_payload(tmp_path, monkeypatch, every_notification()["approval"])
     result = subprocess.run(
-        [node, "-e", NODE_HARNESS, str(source), json.dumps(sent), "allow"],
+        [node, "-e", NODE_HARNESS, str(source), json.dumps(sent), "hermie.request.allow"],
         capture_output=True, text=True, timeout=30, check=True,
     )
     real = json.loads(result.stdout)
     port = service_worker_shows(sent)
     assert real["shown"] == port
-    assert real["posted"] == {"source": "hermie-push", "response": service_worker_tap(port, "allow")}
+    assert real["posted"] == {"source": "hermie-push", "response": service_worker_tap(port, "hermie.request.allow")}
 
 
 # -- the relay ---------------------------------------------------------------

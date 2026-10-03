@@ -8,7 +8,8 @@ manifest_version: 1
 version: 0.10.0
 description: >-
   Hermie's gateway-side companion: push notifications for bot messages, approval
-  and clarify requests, and cron deliveries, plus a `/me` command that says who
+  and clarify requests (and, where the gateway reports them, secure inputs,
+  confirmations and passkey changes), and cron deliveries, plus a `/me` command that says who
   the gateway thinks it is talking to and how it worked that out. Registrations
   and settings live in the gateway's own profile ui_meta. Notifications go out
   through Expo, Web Push, or the Hermie push relay for the native Apple apps,
@@ -36,13 +37,31 @@ python_dependencies: []
 
 # `hooks` is the human-facing list; `provides_hooks` is what `hermes plugins
 # doctor` checks the registration against, so the two are kept identical.
+#
+# These are the hooks every gateway has. Five more are registered only on a
+# gateway whose own list of hooks names them, and are declared under
+# `optional_hooks`, a sibling key a gateway that supports it checks apart from
+# `provides_hooks`: `pre_confirm_request` and `on_passkey_change` (the fork's: a
+# `confirm` request opened, a passkey added or revoked), and
+# `pre_server_request`, `post_server_request` and `on_background_complete`
+# (named for the fork to implement; no gateway fires them yet). None is
+# listened to where it is unknown, and the push types they feed stay quiet. A
+# gateway without `optional_hooks` support ignores the key.
 hooks: &hooks
   - post_llm_call
   - on_session_end
   - pre_approval_request
+  - post_approval_response
   - pre_tool_call
+  - post_tool_call
   - pre_llm_call
 provides_hooks: *hooks
+optional_hooks:
+  - pre_confirm_request
+  - on_passkey_change
+  - pre_server_request
+  - post_server_request
+  - on_background_complete
 
 # Declared for `hermes plugins show`; the app reads the live set from ui_meta.
 emits: []
