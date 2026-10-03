@@ -1,8 +1,11 @@
 # Design
 
 This is the gateway-side half of Hermie. It runs inside `hermes serve` as a
-Hermes plugin, it has no inbound network surface of its own, and it holds no
-credential the gateway did not already hold.
+Hermes plugin, it opens no listener of its own, and it holds no credential the
+gateway did not already hold. What it does answer over HTTP, it answers through
+the dashboard's own server, behind the dashboard's own sign-in: a few routes
+under `/api/plugins/hermie/` (§4, §8, §9) and the static files of the web client
+(§10), which the dashboard serves from this plugin's `dashboard/` folder.
 
 It replaces the `hermie-web --push` daemon as the default path. The daemon needed
 a second process, a second credential and a WebSocket connection of its own, and
@@ -86,8 +89,9 @@ value to a queue.
 - **`ctx.spawn_task(coro)`** — a supervised asyncio task, cancelled on unload.
   It needs a running loop, so it is not usable from a synchronous hook; the
   sender here is a plain daemon thread instead.
-- **HTTP routes** — possible, on the dashboard web server, and not used. A
-  plugin shipping `dashboard/manifest.json` with an `"api"` key gets its
+- **HTTP routes** — possible, on the dashboard web server, and used only where
+  nothing else works (the memory browser, the turn claim, the display name; see
+  below). A plugin shipping `dashboard/manifest.json` with an `"api"` key gets its
   module-level FastAPI `router` mounted at `/api/plugins/<name>/`
   (`hermes_cli/web_server_dashboard.py::_mount_plugin_api_routes`, called once at
   import from `hermes_cli/web_server.py`). `register(ctx)` has nothing to do with
@@ -114,12 +118,23 @@ value to a queue.
     the smaller point next to the first two.
 
   So anything the app needs goes through `ui_meta`, over the connection it
-  already has — **except the memory browser**, which cannot: it is a
+  already has — **except the memory browser** (and, later, the turn claim and
+  the display name), which cannot: it is a
   request/response surface over far more data than a profile file should carry,
   and the WebSocket has no memory method to borrow (`profiles.remember_onboarding`
   writes USER.md on the default profile with a fixed key set, and `/memory` over
   `slash.exec` is the write-approval queue, not a reader). §9 is what that costs
   and what holds it in.
+- **Static files** — the dashboard serves any file under an enabled plugin's
+  `dashboard/` folder at `/dashboard-plugins/<name>/<path>`
+  (`hermes_cli/web_routers/dashboard_ui.py::serve_plugin_asset`), as long as its
+  extension is on an allow-list (`.js .mjs .css .json .html .svg .png .jpg .jpeg
+  .gif .webp .ico .woff2 .woff .ttf .otf .map`). It blocks path traversal,
+  answers 404 for a folder, sets `Cache-Control: no-store` and no other header,
+  has no single-page fallback and does not compress. It is behind the
+  dashboard's sign-in on a gated gateway. This plugin uses it for the web client
+  in `dashboard/app/` (§10): files, not code. The plugin still adds no listener
+  and no route for them, and `register(ctx)` plays no part in serving them.
 - **No identity, anywhere in the plugin API.** No hook kwarg, no prompt-section
   field and no context object names the person a dashboard session was admitted
   for, even though the gateway stamped it on the session record. §4 explains
@@ -1664,6 +1679,104 @@ inside that profile and the lock it takes is that profile's `MEMORY.md.lock`.
   which is the right scope, since the operator of a profile decides whether its
   memory can be opened. `memory.edit` without `memory.browse` is not a state:
   an app that cannot list an entry cannot name one to replace.
+
+---
+
+## 10. The web client bundle
+
+`dashboard/app/` holds a build of Hermie's browser client, made in the app
+repository (`native/web`, `npm run client:build`) and copied in with
+`scripts/import_web_client.py`. The dashboard serves it (§1, "Static files"); the
+plugin's part is to say whether it is there and intact, in the advert.
+
+### The manifest
+
+The build writes `build.json` beside its files:
+
+```json
+{
+  "files": { "index.html": { "bytes": 1243, "sha256": "<64 hex>" }, "…": "…" },
+  "name": "hermie-web-client",
+  "sourceCommit": "<40 hex>",
+  "sourceRepo": "<owner>/<name>",
+  "totalBytes": 495964,
+  "v": 1,
+  "version": "0.2.0"
+}
+```
+
+Keys sorted, two-space indent, one trailing newline, no timestamp: the same
+commit builds to the same bytes, which is what makes the CI comparison below
+possible at all. It does not list itself.
+
+### The check at load (`web.py`)
+
+`register` calls `web.verify(dashboard/)` once, only while `modules.web` is on,
+and never on a hook. It passes when:
+
+- `build.json` is a regular file, parses, has `v: 1`, the client's name, a
+  semantic version, an `<owner>/<name>` source, a 40-hex commit, a non-empty
+  `files` map whose entries are exactly `{sha256, bytes}`, an `index.html`, and a
+  `totalBytes` equal to the sum;
+- every listed name is a plain relative path (ASCII, forward slashes, no segment
+  starting with a dot, so no `..` and nothing hidden) with an extension the
+  dashboard serves;
+- the folder holds exactly the listed files plus `build.json`: nothing missing,
+  nothing unlisted, no symbolic link anywhere (the listing never follows one, and
+  a file is opened with `O_NOFOLLOW` and checked to be regular on the open
+  descriptor), nothing that is neither a file nor a folder;
+- each file has its listed size, and then its listed SHA-256.
+
+Bounds, so a damaged or hostile tree cannot slow a gateway's start: the listing
+stops after 200 entries or 8 folders deep; a manifest listing more than 200 files
+or more than 8 MB is refused before any file is read; a file's bytes are read
+only after its size matched, so at most the listed total is ever hashed;
+`build.json` itself is capped at 256 kB.
+
+Passing adds `web.client` and the advert's `web` block (`path`, `version`,
+`commit` as 12 hex, `files`, `bytes`). Anything else adds neither: an absent
+`app/` is logged at info (an older checkout, a partial clone), a mismatch as one
+warning that counts the differing files and quotes the first ten reasons. A
+failure inside the check itself is caught: push and the rest must load whatever
+happens here.
+
+`web.py` imports nothing of the package at module level, so the import script
+loads it on its own and applies the same rules to a build before it is copied
+in.
+
+### What the check is not
+
+It withholds the advert, not the files. The dashboard serves what is on disk
+whatever the plugin decides, and `modules.web: false` is the same courtesy: no
+capability, no block, no check, and the files still fetchable to whoever the
+dashboard lets in. The check exists so the app does not offer a client that is
+not what its manifest says, and so a damaged install shows up in the log. It is
+not an access control and is not described as one.
+
+### Import and CI
+
+`scripts/import_web_client.py --dist <dist>` runs the same `verify_tree`, then
+the import limits, which match the app's own bundle gate: at most 900 kB per
+file, 3 MB and 80 files in all, ASCII only in text files, no source maps,
+`build.json` in canonical form. It copies exactly the listed files into a
+temporary folder beside `app/`, checks the copy again and swaps it in by
+renaming, prints the version, commit, file count and size, and does nothing else:
+no commit, no network.
+
+`web-bundle-verify` in CI is what makes a bundle the build of reviewed source.
+It runs the same script with `--check`, refuses a `sourceRepo` other than the app
+repository the workflow names (a pull request writes `build.json`, so the name in
+it is an input, not a fact), checks the app repository out at the named commit
+without keeping a credential, fetches the app's `main` and fails unless the
+commit is an ancestor of it, installs the Node version in the app's `.nvmrc`,
+runs `npm ci` and `npm run client:build`, and compares every file of
+`native/web/dist` with `dashboard/app/`, `build.json` included. `guard-scan`
+scans the tree with the bundle in it, so a bundle that would turn the scanner's
+verdict to `caution` or `dangerous` (and so disable the plugin on the next
+update) cannot be merged either.
+
+Rollback is a revert of the import commit; the dashboard answers `no-store`, so
+the next load is the old client.
 
 ---
 

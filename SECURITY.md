@@ -75,6 +75,49 @@ With `update.check: true` (off by default), one more outbound call: a GET of
 this repository's public releases URL, at most once an hour, with nothing
 identifying sent.
 
+### The web client's files
+
+The plugin carries a build of Hermie's browser client in `dashboard/app/`. The
+dashboard serves it from its own static route, the one it uses for every
+dashboard plugin, at `/dashboard-plugins/hermie/app/<file>`. The plugin adds no
+listener and no route for it and runs no code to serve it. The route serves only
+files with an extension on its allow-list, so this plugin's Python is never
+served, and it answers `Cache-Control: no-store`.
+
+| Caller | Gated gateway (sign-in on) | Ungated gateway |
+|---|---|---|
+| Not signed in | `302 /login?next=…` for every file | the static files, the same exposure as the dashboard's own bundle; every `/api/*` call still needs the session token |
+| Signed in | the file | the file |
+
+The files are a static build and hold no secret, no address and no credential.
+The client holds none either: on a gated gateway it uses the dashboard's own
+`HttpOnly` cookie session, and the gateway authenticates every call it makes.
+
+**Same origin as the dashboard is the central fact.** The client runs on the
+origin that also serves the dashboard API. A script-injection bug in the client
+would act with the signed-in person's session against every `/api/*` route:
+configuration, files, the terminal, every profile. That is operator access to
+the gateway host. It is the reach the older Hermie Web build had too (it proxied
+`/api/*` onto its own origin), and it is why the client is built with no path for
+injected markup (bot output is never rendered as raw HTML), a content security
+policy in its document that allows scripts and connections from its own origin
+only, no remote images, and allow-listed link schemes. The reverse direction is
+accepted: other code on the origin (the dashboard, other dashboard plugins) can
+read the client's browser storage. That code is already trusted by the operator,
+and the client stores no credential there.
+
+**Integrity.** `dashboard/app/build.json` names the source repository and
+commit and the size and SHA-256 of every file. At load the plugin checks the
+folder against it (nothing changed, missing, unlisted, linked or outside `app/`)
+and advertises the client (`web.client` and the advert's `web` block) only when
+it matches. Before a bundle is merged, CI rebuilds the named commit, which must
+be on the app repository's `main`, and compares every byte, and the Hermes
+plugin scanner has to call the tree with the bundle in it `safe`. The check at
+load withholds the **advert**, not the files: the dashboard serves what is on
+disk whatever the plugin concludes. `modules.web: false` is the same: it
+withdraws the advert, and the files stay fetchable to whoever the dashboard lets
+in. Neither is an access control, and neither is described as one.
+
 ## The turn claim
 
 `POST /api/plugins/hermie/context/turn` lets the person actually sending a
@@ -161,6 +204,17 @@ request id as a hint; the app re-reads the gateway's open requests and answers
 only if that request is still open and still says what the notification said.
 
 ## Known and accepted
+
+- **The web client's files are not withdrawn by anything in this plugin.**
+  `modules.web: false` and a failed integrity check remove the advert, not the
+  files. To make them unreachable, disable or uninstall the plugin. On an
+  ungated gateway they are readable by anyone who can reach the dashboard, like
+  the dashboard's own bundle.
+- **On plain Hermes the client's files get no `frame-ancestors` and no `nosniff`
+  header.** The dashboard's static route sets neither and a page cannot set
+  `frame-ancestors` itself, so the client refuses to render inside a frame
+  instead. Another site cannot frame it with a session (the session cookie is
+  `SameSite=Lax`), but a sibling subdomain on the same site could.
 
 - **Profile metadata is per profile, not per user.** Everyone with access to a
   gateway can read everyone else's push registrations and context sections on it.
