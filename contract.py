@@ -47,6 +47,7 @@ read for one more version. The readers are ``push/registrations.py`` and
                     cron_done: true, cron_failed: true,
                     turn_done: false, turn_failed: false}   # absent = off
             preview: false
+            clears: true            # understands a clearing push; absent = does not (opt-in)
             gatewayKey: bf796761db84e312   # FNV-1a over the origin it registered against
             updatedAt: 1789957143
         perBot:                     # where one chat differs from the switches above
@@ -151,6 +152,30 @@ CAP_PUSH_GATEWAY_KEY = "push.gateway_key"
 # neither, so a tap can open the right conversation. Advertised only where this
 # gateway can actually read a session's title.
 CAP_PUSH_SESSION_KIND = "push.session_kind"
+# A request notification that was answered, cancelled or timed out is followed
+# by a clearing push (`clear: true`) to a device whose row says `clears: true`.
+# Two strings because two roads: Expo and Web Push rows get it now; a relay row
+# only once the relay can carry a message that is not an alert (see
+# `push/relay.py::CAN_CLEAR`), and an app that reads the first and not the
+# second must not assume the relay will clear anything.
+CAP_PUSH_CLEAR = "push.clear"
+CAP_PUSH_CLEAR_RELAY = "push.clear.relay"
+# A `confirm` request raises a notification (`method: confirm`, with its
+# `level`, never offering Allow or Deny). Claimed only where the gateway fires
+# the hook that says one was opened, which is the fork's.
+CAP_PUSH_CONFIRM = "push.request.confirm"
+# The secure inputs (`secret`, `sudo`, `vault.*`) and a clarify question that
+# has its request id raise a notification. Claimed only where the gateway
+# reports its server requests, which no gateway does yet.
+CAP_PUSH_SECURE_INPUT = "push.request.secure_input"
+# A passkey added to or revoked from a person's account notifies that person's
+# devices whatever they muted (`type: security`). Claimed only where the gateway
+# fires the hook that says so, which is the fork's.
+CAP_PUSH_SECURITY = "push.security"
+# A background task finishing notifies (`type: turn_done`,
+# `event: background.complete`). Claimed only where the gateway reports it,
+# which no gateway does yet.
+CAP_PUSH_BACKGROUND = "push.background"
 CAP_UIMETA_PER_USER = "ui_meta.per_user"
 CAP_CONTEXT_PROMPT = "context.system_prompt"
 CAP_CONTEXT_PER_BOT = "context.per_bot"

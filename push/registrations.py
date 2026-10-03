@@ -118,6 +118,17 @@ class Registration:
     # The device's notification key, for the encrypted step. Carried as the row
     # wrote it; nothing reads it yet.
     enc: Dict[str, Any] = field(default_factory=dict, repr=False)
+    # The device says it understands a clearing push (`clear: true`): one that
+    # withdraws a request notification instead of raising one. Opt-in, because a
+    # sender cannot tell which build of a client is on the other end, and a
+    # build that does not know the field would show a clearing push as a new
+    # notification — with the Allow and Deny buttons of the request it closes.
+    clears: bool = False
+    # A Web Push row only: the worker behind it reads a request's `method`, so it
+    # shows no Allow or Deny for a confirmation or a secure input. The worker
+    # shipped with the Expo web build gives every request both buttons, and never
+    # writes this.
+    request_methods: bool = False
 
     @property
     def may_preview(self) -> bool:
@@ -395,6 +406,8 @@ def registration_of(installation_id: str, value: Any, user_id: str = "") -> Opti
         # "yes" on a notification, and a device comparing keys would match
         # nothing — which is the failure that looks like nothing at all.
         "gateway_key": str(value.get("gatewayKey")) if is_gateway_key(value.get("gatewayKey")) else "",
+        "clears": value.get("clears") is True,
+        "request_methods": value.get("requestMethods") is True,
     }
 
     if transport == "expo":

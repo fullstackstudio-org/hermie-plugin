@@ -92,6 +92,14 @@ MAX_THREAD_CHARS = 256
 # How long the relay should keep trying a device that is offline.
 TTL_SECONDS = 3600
 
+# Whether the relay can carry a clearing push. It cannot yet: every message it
+# relays is an APNs alert with a sound, so the only way to withdraw a request
+# notification through it would be to raise a second one, which buzzes a person
+# who has just answered. Until the relay takes a message that is not an alert
+# (`apns-push-type: background`, no sound, the same collapse id), a clearing
+# push is not sent to a relay row at all and the app clears what it can itself.
+CAN_CLEAR = False
+
 TIMEOUT_SECONDS = 10
 
 # How much of an answer is read. The relay's answer to twenty messages is a

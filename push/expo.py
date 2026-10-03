@@ -187,3 +187,26 @@ def message_for(token: str, payload: Dict[str, Any], *, title: str, body: str) -
     if category:
         message["categoryId"] = category
     return message
+
+
+# How long a clearing push is worth delivering. It withdraws a request that lives
+# for a couple of minutes; a device that comes back after this has nothing to
+# clear.
+CLEAR_TTL_SECONDS = 600
+
+
+def clearing_message_for(token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """One Expo message that withdraws a notification instead of raising one.
+
+    No title, no body, no sound and no category: `_contentAvailable` hands the
+    data to the app in the background on iOS, and a message with no visible half
+    is a data message on Android. The app finds the notification to take down in
+    `data` (`requestId`, `replaces`).
+    """
+    return {
+        "to": token,
+        "data": payload,
+        "_contentAvailable": True,
+        "priority": "normal",
+        "ttl": CLEAR_TTL_SECONDS,
+    }

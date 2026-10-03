@@ -10,6 +10,7 @@ already late is worth less than a turn that is still fast.
 
 from __future__ import annotations
 
+import collections
 import logging
 import queue
 import threading
@@ -27,6 +28,42 @@ logger = logging.getLogger(__name__)
 NAME = "push"
 
 QUEUE_SIZE = 256
+
+# Hooks this plugin listens to only where the gateway has them. The gateway
+# complains about a hook it does not know (`hermes plugins doctor` calls it an
+# error) and a plain upstream gateway has none of these, so each is registered
+# only when the gateway's own list names it, and none is in the manifest's
+# `provides_hooks`. Which one feeds which push is `PushModule.optional_hooks`.
+OPTIONAL_HOOKS = (
+    # The fork's: a `confirm` request was written to the person's apps, and a
+    # passkey of theirs was added or revoked.
+    "pre_confirm_request",
+    "on_passkey_change",
+    # Not fired by any gateway yet. The server requests that have no hook of
+    # their own (the secure inputs, a clarify question's id), when one was
+    # opened and when it stopped being open, and a background task finishing.
+    # Named here so the fork has one agreed shape to implement; see DESIGN.md.
+    "pre_server_request",
+    "post_server_request",
+    "on_background_complete",
+)
+
+
+def known_hooks() -> Optional[Set[str]]:
+    """The hooks this gateway knows by name, or ``None`` when it cannot be asked.
+
+    Asked of the gateway rather than assumed: a plugin loaded by something that
+    is not a gateway (a test, `validate` against a probe) has no list, and then
+    nothing optional is registered — a hook that is never fired costs nothing,
+    one that is unknown costs an error.
+    """
+    try:
+        from hermes_cli.plugins import VALID_HOOKS  # type: ignore
+
+        return {str(name) for name in VALID_HOOKS}
+    except Exception:
+        return None
+
 
 # How many distinct "not served" reports one process makes. A row is input, and
 # a co-user writing a new origin into one on every turn must not be able to grow
@@ -58,6 +95,20 @@ class PushModule:
         self._relay_pacing = relay.Pacing()
         self._relay_trust = relay.Trust()
         self._clock = time.monotonic
+        # Which of `OPTIONAL_HOOKS` the gateway has and this module is listening
+        # to. Filled in by `register`; empty means "none", which is every
+        # gateway that is not the fork.
+        self.optional_hooks: Set[str] = set()
+        # Whether `pre_server_request` has actually been heard in this process. A
+        # gateway that only NAMES the hook fires nothing, and the clarify push
+        # from the tool hook must not go silent on its word.
+        self._server_requests_heard = False
+        # The tool calls whose clarify push was raised from the tool hook, so the
+        # clear for them comes from the tool hook too, whatever was heard since.
+        self._tool_clarifies: "collections.deque[str]" = collections.deque(maxlen=256)
+        # request id -> (whether its notification was bound to one person, and
+        # which), so the clear reaches exactly the devices the raise did.
+        self._strict_requests: "collections.OrderedDict[str, Tuple[bool, str]]" = collections.OrderedDict()
 
     # -- settings ------------------------------------------------------------
     #
@@ -180,6 +231,21 @@ class PushModule:
             found.append(contract.CAP_PUSH_CRON_FAILED)
         if self.cron_signal_available():
             found.append(contract.CAP_PUSH_CRON_SIGNAL)
+        # A request that stopped being open is withdrawn on the transports that
+        # can carry a message with nothing to show. See `relay.CAN_CLEAR`.
+        found.append(contract.CAP_PUSH_CLEAR)
+        if relay.CAN_CLEAR and relay.DEFAULT_ORIGIN in self.relay_origins:
+            found.append(contract.CAP_PUSH_CLEAR_RELAY)
+        # What only a gateway that fires the hook can do is claimed only when
+        # the hook is there to listen to.
+        for hook, capability in (
+            ("pre_confirm_request", contract.CAP_PUSH_CONFIRM),
+            ("pre_server_request", contract.CAP_PUSH_SECURE_INPUT),
+            ("on_passkey_change", contract.CAP_PUSH_SECURITY),
+            ("on_background_complete", contract.CAP_PUSH_BACKGROUND),
+        ):
+            if hook in self.optional_hooks:
+                found.append(capability)
         return found
 
     def cron_signal_available(self) -> bool:
@@ -268,10 +334,10 @@ class PushModule:
         session that cannot be read leaves the field out, and the app reads the
         notification the way it read every notification before this existed.
         """
-        if not notification.session_id:
+        if not notification.kind_session:
             return ""
         try:
-            return sessions.kind_for(notification.session_id)
+            return sessions.kind_for(notification.kind_session)
         except Exception:
             return ""
 
@@ -315,6 +381,8 @@ class PushModule:
         sent = 0
 
         for registration, preview in targets:
+            if notification.clear and registration.transport == "relay" and not relay.CAN_CLEAR:
+                continue
             # `recipients` already refused text to a relay row; asked again here
             # because this is the last decision before the wire.
             preview = preview and registration.may_preview
@@ -375,10 +443,14 @@ class PushModule:
                         registration.installation_id,
                     )
                     continue
-                expo_batch.append(expo.message_for(registration.token or "", payload, title=title, body=body))
+                expo_batch.append(
+                    expo.clearing_message_for(registration.token or "", payload)
+                    if notification.clear
+                    else expo.message_for(registration.token or "", payload, title=title, body=body)
+                )
                 expo_owners.append(registration.installation_id)
             elif registration.transport == "webpush":
-                sent += self._send_webpush(registration, payload, title, body)
+                sent += self._send_webpush(registration, payload, title, body, clear=notification.clear)
 
         if expo_batch:
             sent += self._send_expo(expo_batch, expo_owners)
@@ -442,7 +514,9 @@ class PushModule:
             self._vapid_key = webpush.load_or_create_key(path)
         return self._vapid_key
 
-    def _send_webpush(self, registration, payload: Dict[str, Any], title: str, body: str) -> int:
+    def _send_webpush(
+        self, registration, payload: Dict[str, Any], title: str, body: str, *, clear: bool = False
+    ) -> int:
         if not webpush.available():
             return 0
         try:
@@ -457,7 +531,9 @@ class PushModule:
             # The shape the app's service worker reads: the two visible
             # strings, and the payload under `data`. It was flat once, and the
             # worker found no bot in it — so a tap opened nothing in particular.
-            {"title": title, "body": body, "data": payload},
+            # A clearing push has nothing to show: `data` alone, so a worker that
+            # does not know `clear` has no title to put on a banner.
+            {"data": payload} if clear else {"title": title, "body": body, "data": payload},
             contact=str(self.runtime.config("push.vapid_contact", "") or ""),
         )
         if result.device_gone:
@@ -536,6 +612,7 @@ class PushModule:
                 description=kwargs.get("description"),
                 request_id=kwargs.get("request_id"),
                 turn_id=kwargs.get("turn_id"),
+                tool_call_id=kwargs.get("tool_call_id"),
                 at=int(time.time()),
                 # This hook carries no `task_id`, so the answer comes from the
                 # session variable or from a `cron_…` session id — core fills in
@@ -544,10 +621,37 @@ class PushModule:
             )
         )
 
+    def on_post_approval_response(self, **kwargs: Any) -> None:
+        """An approval is over: tell the devices it reached (see `events.clear_approval`)."""
+        if str(kwargs.get("surface") or "") == "smart" or kwargs.get("coalesced"):
+            # Nobody was asked on the smart path; and a follower that waited on
+            # another approval's answer must not withdraw the one still open.
+            return
+        self.offer(
+            events.clear_approval(
+                bot=self.runtime.bot_name(),
+                session_key=str(kwargs.get("session_key") or ""),
+                description=kwargs.get("description"),
+                request_id=kwargs.get("request_id"),
+                turn_id=kwargs.get("turn_id"),
+                tool_call_id=kwargs.get("tool_call_id"),
+                choice=kwargs.get("choice"),
+                at=int(time.time()),
+                cron=self.cron_of(kwargs),
+            )
+        )
+
     def on_pre_tool_call(self, **kwargs: Any) -> None:
         if str(kwargs.get("tool_name") or "") != "clarify":
             return
+        if self._server_requests_heard:
+            # This gateway reports the question itself, with its request id; a
+            # second notification for it from here would buzz twice. Only once it
+            # has been heard doing so: a gateway that merely names the hook says
+            # nothing, and the question would go unannounced.
+            return
         args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
+        self._tool_clarifies.append(str(kwargs.get("tool_call_id") or ""))
         self.offer(
             events.from_clarify(
                 bot=self.runtime.bot_name(),
@@ -559,12 +663,132 @@ class PushModule:
             )
         )
 
+    def on_post_tool_call(self, **kwargs: Any) -> None:
+        """A clarify question is over, however it ended (see `events.clear_clarify`)."""
+        if str(kwargs.get("tool_name") or "") != "clarify":
+            return
+        if self._server_requests_heard and str(kwargs.get("tool_call_id") or "") not in self._tool_clarifies:
+            return
+        self.offer(
+            events.clear_clarify(
+                bot=self.runtime.bot_name(),
+                session_id=str(kwargs.get("session_id") or ""),
+                tool_call_id=kwargs.get("tool_call_id"),
+                reason=events.clarify_clear_reason(kwargs.get("status"), kwargs.get("result")),
+                at=int(time.time()),
+                cron=self.cron_of(kwargs),
+            )
+        )
+
+    # -- hooks only some gateways have --------------------------------------------
+
+    def on_pre_confirm_request(self, **kwargs: Any) -> None:
+        """A `confirm` request is open (the fork). Runs on the gateway's own thread."""
+        note = events.from_confirm(
+            bot=self.runtime.bot_name(),
+            request_id=kwargs.get("request_id"),
+            level=kwargs.get("level"),
+            session_id=kwargs.get("session_id"),
+            session_key=kwargs.get("session_key"),
+            user_id=kwargs.get("user_id"),
+            at=int(time.time()),
+            cron=self.cron_of(kwargs),
+        )
+        if note is not None:
+            self._strict_requests[str(kwargs.get("request_id"))] = (note.user_strict, note.user_id)
+            while len(self._strict_requests) > 256:
+                self._strict_requests.popitem(last=False)
+        self.offer(note)
+
+    def on_passkey_change(self, **kwargs: Any) -> None:
+        """A passkey was added or revoked (the fork): a notice that cannot be muted."""
+        self.offer(
+            events.from_passkey_change(
+                bot=self.runtime.bot_name(),
+                change=kwargs.get("change"),
+                user_id=kwargs.get("user_id"),
+                credential=kwargs.get("credential"),
+                at=int(kwargs.get("at") or time.time()),
+            )
+        )
+
+    def on_pre_server_request(self, **kwargs: Any) -> None:
+        """A secure input, or a clarify question with its id, was written to the apps."""
+        self._server_requests_heard = True
+        self.offer(
+            events.from_server_request(
+                bot=self.runtime.bot_name(),
+                method=kwargs.get("method"),
+                request_id=kwargs.get("request_id"),
+                session_id=kwargs.get("session_id"),
+                session_key=kwargs.get("session_key"),
+                user_id=kwargs.get("user_id"),
+                at=int(time.time()),
+                cron=self.cron_of(kwargs),
+            )
+        )
+
+    def on_post_server_request(self, **kwargs: Any) -> None:
+        """A request the gateway reported is no longer open."""
+        method = kwargs.get("method")
+        # A confirmation is as strict as it was raised; one this process did not see
+        # raised (a restart in between) is taken to be the strict kind, which can
+        # only withhold a clear from a device that was never asked.
+        strict, raised_for = self._strict_requests.get(
+            str(kwargs.get("request_id")), (method == events.METHOD_CONFIRM, "")
+        )
+        self.offer(
+            events.clear_server_request(
+                user_strict=strict,
+                bot=self.runtime.bot_name(),
+                method=kwargs.get("method"),
+                request_id=kwargs.get("request_id"),
+                reason=kwargs.get("reason"),
+                session_id=kwargs.get("session_id"),
+                session_key=kwargs.get("session_key"),
+                user_id=kwargs.get("user_id") or raised_for,
+                at=int(time.time()),
+                cron=self.cron_of(kwargs),
+            )
+        )
+
+    def on_background_complete(self, **kwargs: Any) -> None:
+        """A background task finished (never the result it produced)."""
+        self.offer(
+            events.from_background_complete(
+                bot=self.runtime.bot_name(),
+                session_id=kwargs.get("session_id"),
+                session_key=kwargs.get("session_key"),
+                task_id=kwargs.get("task_id"),
+                at=int(time.time()),
+                user_id=kwargs.get("user_id"),
+            ),
+            delay=True,
+        )
+
 
 def register(ctx, runtime) -> PushModule:
     module = PushModule(runtime)
     ctx.register_hook("post_llm_call", module.on_post_llm_call)
     ctx.register_hook("on_session_end", module.on_session_end)
     ctx.register_hook("pre_approval_request", module.on_pre_approval_request)
+    ctx.register_hook("post_approval_response", module.on_post_approval_response)
     ctx.register_hook("pre_tool_call", module.on_pre_tool_call)
+    ctx.register_hook("post_tool_call", module.on_post_tool_call)
+    # The rest only where the gateway names them. A hook it does not know is an
+    # error for `hermes plugins doctor` and a warning in the log on every load,
+    # and a gateway that never fires one has nothing to tell this module.
+    handlers = {
+        "pre_confirm_request": module.on_pre_confirm_request,
+        "on_passkey_change": module.on_passkey_change,
+        "pre_server_request": module.on_pre_server_request,
+        "post_server_request": module.on_post_server_request,
+        "on_background_complete": module.on_background_complete,
+    }
+    known = known_hooks()
+    for name in OPTIONAL_HOOKS:
+        if known is not None and name in known:
+            ctx.register_hook(name, handlers[name])
+            module.optional_hooks.add(name)
     ctx.on_unload(module.stop)
     return module
