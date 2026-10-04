@@ -6,6 +6,17 @@ people.
 
 ## Unreleased
 
+### Added
+
+- **A form, a file request and a draft to review raise a notification.** On a gateway that fires
+  `pre_server_request`, a `type: request` push for `input.form`, `input.file` and `review.draft`
+  carries the method, the `requestId` and the conversation, and nothing else: the lock screen says
+  only which kind of thing it is (a form, a file, a draft), never what is in it. No category, so no
+  Allow or Deny. A request parked for want of a capable device (`reached: 0`) is still pushed, since
+  the push is what brings the phone back. A chat mute silences it like any request, and
+  `post_server_request` withdraws it. A Web Push row whose worker does not read request methods is
+  not sent one.
+
 ## 0.11.0 — 2026-10-04
 
 ### Added

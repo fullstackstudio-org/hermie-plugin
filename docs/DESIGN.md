@@ -388,7 +388,7 @@ Registrations are not the plugin's state at all — they live in the app's
 | a turn was interrupted | `on_session_end` (`interrupted`) | *nothing — somebody pressed stop* |
 | approval requested | `pre_approval_request` (not `surface: smart`) | `request`, `method: approval` |
 | a question asked | `pre_tool_call` (`tool_name == "clarify"`), unless `pre_server_request` is there | `request`, `method: clarify` |
-| a server request opened | `pre_server_request` (secure inputs, clarify) | `request`, `method` as the gateway names it |
+| a server request opened | `pre_server_request` (secure inputs, interactive requests, clarify) | `request`, `method` as the gateway names it |
 | a `confirm` request opened | `pre_confirm_request` | `request`, `method: confirm`, `level` |
 | a background task finished | `on_background_complete` | `turn_done`, `event: background.complete` |
 | a passkey added or revoked | `on_passkey_change` | `security` |

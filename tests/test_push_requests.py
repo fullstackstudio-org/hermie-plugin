@@ -86,6 +86,9 @@ BUILDERS = {
     "vault_save_login": (lambda: request("vault.save_login"), True),
     "confirm_passkey": (lambda: confirm("passkey"), True),
     "confirm_plain": (lambda: confirm("plain"), True),
+    "input_form": (lambda: request("input.form"), True),
+    "input_file": (lambda: request("input.file"), True),
+    "review_draft": (lambda: request("review.draft"), True),
     "clear_approval_answered": (
         lambda: events.clear_approval(
             bot="scout", session_key=STORED, description="rm -rf build", request_id="appr-1", turn_id="t1",
@@ -101,6 +104,13 @@ BUILDERS = {
         lambda: events.clear_server_request(
             bot="scout", method="secret", request_id=RID, reason="cancelled", session_id=RUNTIME,
             session_key=STORED, at=AT, user_id=USER,
+        ),
+        False,
+    ),
+    "clear_input_form_answered": (
+        lambda: events.clear_server_request(
+            bot="scout", method="input.form", request_id=RID, reason="answered", session_id=RUNTIME,
+            session_key=STORED, at=AT,
         ),
         False,
     ),
@@ -225,6 +235,50 @@ def test_a_request_reads_its_sessions_kind_from_the_stored_id():
     assert events.from_assistant_message(
         bot="scout", session_id="s9", turn_id="t", assistant_response="hi", at=AT
     ).kind_session == "s9"
+
+
+@pytest.mark.parametrize("method", events.INTERACTIVE_METHODS)
+def test_an_interactive_request_says_which_kind_and_nothing_about_it(method):
+    """A form's fields, the files asked for and a draft's text are the agent's words."""
+    note = request(method)
+    for preview in (False, True):
+        data = note.payload(preview=preview, gateway_key=KEY)
+        title, body = note.rendered(preview=preview)
+        assert (title, body) == ("scout", events.INTERACTIVE_BODY[method])
+        assert "preview" not in data
+        assert data["method"] == method and data["requestId"] == RID and data["type"] == "request"
+        # Only the contract's keys, and the ones a request carries.
+        assert set(data) == {"v", "type", "bot", "at", "eventId", "sessionId", "sessionKey", "gatewayKey", "method",
+                             "requestId"}
+        assert not any(key in data for key in ("level", "text", "title", "fields", "summary", "kind"))
+    assert events.category_for(note.payload(preview=True)) == ""
+    assert not note.clear and note.user_id == "" and note.user_strict is False
+
+
+@pytest.mark.parametrize("method", events.INTERACTIVE_METHODS)
+def test_the_contract_has_a_buttonless_textless_row_for_each_interactive_method(method):
+    entry = next(entry for entry in CONTRACT["requests"]["methods"] if entry["method"] == method)
+    assert entry == {"method": method, "requestId": "required", "actions": False, "preview": False}
+    assert method in CONTRACT["category"]["notFor"]["methods"]
+
+
+@pytest.mark.parametrize("method", events.INTERACTIVE_METHODS)
+def test_an_interactive_request_without_an_id_is_not_sent(method):
+    for rid in ("", None):
+        assert events.from_server_request(
+            bot="scout", method=method, request_id=rid, session_id=RUNTIME, session_key=STORED, at=AT
+        ) is None
+        assert events.clear_server_request(
+            bot="scout", method=method, request_id=rid, reason="answered", session_id=RUNTIME,
+            session_key=STORED, at=AT,
+        ) is None
+
+
+def test_the_phase_one_methods_and_no_others_are_raised_from_the_generic_hook():
+    assert events.INTERACTIVE_METHODS == ("input.form", "input.file", "review.draft")
+    # The later families are not this plugin's yet.
+    for method in ("review.diff", "input.choice", "device.camera"):
+        assert request(method) is None
 
 
 # -- background.complete ------------------------------------------------------------
@@ -496,6 +550,40 @@ def test_a_background_task_follows_the_finished_turn_switch_and_an_open_chat():
     assert told(note, sec) == ["on"]
 
 
+@pytest.mark.parametrize("method", events.INTERACTIVE_METHODS)
+def test_an_interactive_request_follows_the_request_switch_and_a_mute(method):
+    note = request(method)
+    sec = section(rows=[(USER, "on", row(types=ALL_ON)), (USER, "off", row(types={**ALL_ON, "request": False}))])
+    assert told(note, sec) == ["on"]
+    # A mute outranks the request switch: the `security` exception is not extended to these.
+    muted = section(rows=[(USER, "on", row(types=ALL_ON))], mutes={USER: {"scout": 0}})
+    assert told(note, muted) == []
+    # ... but only for the muted bot.
+    other = section(rows=[(USER, "on", row(types=ALL_ON))], mutes={USER: {"other-bot": 0}})
+    assert told(note, other) == ["on"]
+    # An open chat does not hold a request back.
+    seen = section(rows=[(USER, "on", row(types=ALL_ON))], seen={"on": {"bot": "scout", "at": 999}})
+    assert told(note, seen) == ["on"]
+
+
+def test_an_interactive_request_is_for_everyone_the_gateway_can_vouch_for_and_not_only_one_person():
+    sec = section(
+        rows=[
+            (USER, "mine", row(types=ALL_ON)),
+            ("self-hosted:someone-else", "theirs", row(types=ALL_ON)),
+            ("", "legacy", row(types=ALL_ON)),
+        ]
+    )
+    assert told(request("input.form", user_id=USER), sec) == ["legacy", "mine"]
+    assert told(request("input.form"), sec) == ["legacy", "mine", "theirs"]
+
+
+def test_a_clearing_push_for_an_interactive_request_goes_only_to_a_device_that_asked_for_one():
+    sec = section(rows=[(USER, "new", row(types=ALL_ON, clears=True)), (USER, "old", row(types=ALL_ON))])
+    assert told(BUILDERS["clear_input_form_answered"][0](), sec) == ["new"]
+    assert told(request("input.form"), sec) == ["new", "old"]
+
+
 # -- delivery -----------------------------------------------------------------------------
 
 
@@ -579,6 +667,36 @@ def test_a_relay_row_is_sent_the_secure_input_with_no_category_and_no_text(tmp_p
     assert message["data"]["method"] == "secret" and "preview" not in message["data"]
     # The conversation stack and the collapse id are the relay's existing ones.
     assert message["collapseId"] == request("secret").event_id
+
+
+@pytest.mark.parametrize("method", events.INTERACTIVE_METHODS)
+def test_an_interactive_request_is_posted_with_no_category_and_no_text(tmp_path, monkeypatch, method):
+    module = module_with(tmp_path, monkeypatch, [(USER, "p", row(types=ALL_ON, preview=True))])
+    sent = capture_expo(monkeypatch)
+    assert module.deliver(request(method)) == 1
+    assert "preview" not in sent[0]["data"] and "categoryId" not in sent[0]
+    assert sent[0]["body"] == events.INTERACTIVE_BODY[method]
+    assert sent[0]["channelId"] == "request"
+    assert sent[0]["data"]["method"] == method and sent[0]["data"]["requestId"] == RID
+
+
+def test_a_relay_row_is_sent_an_interactive_request_with_no_category_and_no_text(tmp_path, monkeypatch):
+    relay_row = {
+        "v": 1, "transport": "relay", "relay": "https://push.hermie.dev", "handle": "h_1", "secret": "s",
+        "platform": "ios", "types": ALL_ON, "preview": True, "updatedAt": 1,
+    }
+    module = module_with(tmp_path, monkeypatch, [(USER, "p", relay_row)])
+    posted = []
+    monkeypatch.setattr(
+        relay, "send",
+        lambda origin, entries, **kw: posted.extend(entries) or [relay.Outcome(status=relay.SENT) for _ in entries],
+    )
+    module.deliver(request("input.form"))
+    message = posted[0]["message"]
+    assert "category" not in message
+    assert (message["title"], message["body"]) == ("scout", "Has a form for you")
+    assert message["data"]["method"] == "input.form" and "preview" not in message["data"]
+    assert message["collapseId"] == request("input.form").event_id
 
 
 def test_a_secure_input_never_carries_text_even_to_a_device_that_asked_for_previews(tmp_path, monkeypatch):
@@ -751,6 +869,61 @@ def test_the_generic_request_hooks_raise_and_withdraw(tmp_path, monkeypatch):
     assert cleared.clear and cleared.extra["reason"] == "timeout" and cleared.extra["replaces"] == raised.event_id
 
 
+@pytest.mark.parametrize("method", events.INTERACTIVE_METHODS)
+def test_a_form_push_and_its_clear_come_from_the_generic_hooks(tmp_path, monkeypatch, method):
+    ctx, _, built = all_hooks(tmp_path, monkeypatch)
+    ctx.hooks["pre_server_request"][0](
+        method=method, request_id=RID, session_id=RUNTIME, session_key=STORED, user_id=USER, expires_at=AT + 300,
+        reached=1,
+        # What a gateway never sends and must never be read if it did.
+        title="Your passport", fields=[{"name": "secret"}], text="confidential draft",
+    )
+    ctx.hooks["post_server_request"][0](
+        method=method, request_id=RID, session_id=RUNTIME, session_key=STORED, user_id=USER, reason="resolved"
+    )
+    raised, cleared = built
+    assert (raised.type, raised.extra) == ("request", {"method": method, "requestId": RID})
+    assert raised.session_id == RUNTIME and raised.session_key == STORED and not raised.clear
+    for text in (raised.title, raised.body, raised.text, json.dumps(raised.payload(preview=True))):
+        assert "passport" not in text and "confidential" not in text and "secret" not in text
+    assert cleared.clear and cleared.extra["reason"] == "answered" and cleared.extra["replaces"] == raised.event_id
+    assert cleared.extra["method"] == method and cleared.extra["requestId"] == RID
+    assert cleared.session_id == RUNTIME and cleared.session_key == STORED
+
+
+@pytest.mark.parametrize("reached", [0, 1, None])
+def test_a_parked_request_is_pushed_too_however_many_apps_it_reached(tmp_path, monkeypatch, reached):
+    """`reached: 0` is a request waiting for a capable device: the push is what brings it back."""
+    ctx, _, built = all_hooks(tmp_path, monkeypatch)
+    kwargs = dict(method="input.form", request_id=RID, session_id=RUNTIME, session_key=STORED, expires_at=AT + 120)
+    if reached is not None:
+        kwargs["reached"] = reached
+    ctx.hooks["pre_server_request"][0](**kwargs)
+    [note] = built
+    assert note.extra["method"] == "input.form" and note.extra["requestId"] == RID
+
+
+def test_a_parked_request_reaches_a_registered_device_end_to_end(tmp_path, monkeypatch):
+    module = module_with(tmp_path, monkeypatch, [(USER, "p", row(types=ALL_ON))])
+    sent = capture_expo(monkeypatch)
+    delivered = []
+    monkeypatch.setattr(module, "offer", lambda note, delay=False: delivered.append(module.deliver(note)))
+    module.on_pre_server_request(
+        method="review.draft", request_id=RID, session_id=RUNTIME, session_key=STORED, reached=0, expires_at=AT + 120
+    )
+    assert delivered == [1]
+    assert sent[0]["data"]["method"] == "review.draft" and sent[0]["body"] == "Has a draft to review"
+
+
+def test_a_muted_chat_gets_no_interactive_push_from_the_hook(tmp_path, monkeypatch):
+    ctx, _, built = all_hooks(tmp_path, monkeypatch)
+    ctx.hooks["pre_server_request"][0](method="input.file", request_id=RID, session_id=RUNTIME, session_key=STORED)
+    [note] = built
+    muted = section(rows=[(USER, "phone", row(types=ALL_ON))], mutes={USER: {"scout": 0}})
+    assert told(note, muted) == []
+    assert told(note, section(rows=[(USER, "phone", row(types=ALL_ON))])) == ["phone"]
+
+
 def test_a_background_task_is_raised_with_the_graces_delay(tmp_path, monkeypatch):
     ctx, module, _ = all_hooks(tmp_path, monkeypatch)
     delays = []
@@ -874,7 +1047,10 @@ def webpush_row(**overrides):
 
 def test_a_web_push_row_gets_a_buttonless_request_only_if_its_worker_reads_methods():
     sec = section(rows=[(USER, "old", webpush_row()), (USER, "new", webpush_row(requestMethods=True))])
-    for note in (confirm("plain"), request("secret"), request("vault.code")):
+    for note in (
+        confirm("plain"), request("secret"), request("vault.code"), request("input.form"), request("input.file"),
+        request("review.draft"),
+    ):
         assert told(note, sec) == ["new"], note.extra["method"]
     # An approval, a clarify and every other transport are unchanged.
     assert told(BUILDERS["approval"][0](), sec) == ["new", "old"]
