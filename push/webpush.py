@@ -70,32 +70,60 @@ def load_or_create_key(path: Path):
     """The gateway's VAPID private key, minted on first use.
 
     The key identifies this gateway to every push service its users' browsers
-    happen to use, so it is written 0600 and it is never rotated automatically:
-    rotating it invalidates nothing on the browser side, but it does make every
-    push service treat this sender as new, which is a cost with no benefit
-    unless the key leaked.
+    happen to use, and its public half is what every browser subscribes with
+    (the advert's `webPush.publicKey`). So it is written 0600 and it is never
+    rotated automatically: a new key is a gateway every existing subscription
+    stops matching, and each push service then refuses this sender (a 403)
+    until the device subscribes again. That is a cost with no benefit unless
+    the key leaked, and an operator who decides it did removes the file.
+
+    Minting is exclusive. The key is created at load, and a gateway and a
+    `hermes plugins validate` probe can load at the same moment; whichever
+    creates the file first wins and the other reads that key back, so neither
+    replaces a key somebody may already have subscribed with.
     """
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 
     if path.exists():
-        try:
-            return serialization.load_pem_private_key(path.read_bytes(), password=None)
-        except Exception as exc:
-            logger.warning("hermie: VAPID key at %s is unreadable (%s); refusing to overwrite it", path, exc)
-            raise
+        return _load_existing(path)
 
     key = ec.generate_private_key(ec.SECP256R1())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(
-        key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # 0600 from the first byte, rather than written and then narrowed.
+        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _load_existing(path)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(pem)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        # A half-written file would be "unreadable" on every later load, and
+        # that is refused rather than replaced. Nothing has subscribed with a
+        # key that was never finished, so this one file may go.
+        path.unlink(missing_ok=True)
+        raise
     os.chmod(path, 0o600)
     return key
+
+
+def _load_existing(path: Path):
+    """A key file that is already there: read it, or refuse. Never replace it."""
+    from cryptography.hazmat.primitives import serialization
+
+    try:
+        return serialization.load_pem_private_key(path.read_bytes(), password=None)
+    except Exception as exc:
+        logger.warning("hermie: VAPID key at %s is unreadable (%s); refusing to overwrite it", path, exc)
+        raise
 
 
 def public_key_bytes(key) -> bytes:
@@ -106,6 +134,11 @@ def public_key_bytes(key) -> bytes:
         encoding=serialization.Encoding.X962,
         format=serialization.PublicFormat.UncompressedPoint,
     )
+
+
+def public_key_b64(key) -> str:
+    """The public half as a browser's `applicationServerKey` takes it: 87 characters."""
+    return b64(public_key_bytes(key))
 
 
 def _sign_es256(key, message: bytes) -> bytes:
@@ -133,7 +166,7 @@ def vapid_header(key, endpoint: str, contact: str, *, now: Optional[int] = None)
     body = b64(json.dumps(claims, separators=(",", ":")).encode())
     signing_input = f"{header}.{body}".encode("ascii")
     signature = b64(_sign_es256(key, signing_input))
-    return f"vapid t={header}.{body}.{signature}, k={b64(public_key_bytes(key))}"
+    return f"vapid t={header}.{body}.{signature}, k={public_key_b64(key)}"
 
 
 # --- aes128gcm (RFC 8291) ---------------------------------------------------
@@ -194,6 +227,17 @@ class Result:
     def device_gone(self) -> bool:
         """404 and 410 are the push services' way of saying the subscription died."""
         return self.status in (404, 410)
+
+    @property
+    def key_mismatch(self) -> bool:
+        """403: the push service will not take this sender's key for this subscription.
+
+        The subscription was made with another VAPID key than the one this
+        gateway signs with (another sender's, or this gateway's before its key
+        file was replaced). Asking again changes nothing until the device
+        subscribes with this gateway's key, so the row is retired like a dead one.
+        """
+        return self.status == 403
 
     @property
     def ok(self) -> bool:

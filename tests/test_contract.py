@@ -101,3 +101,17 @@ def test_the_web_block_is_published_only_when_given():
     published = contract.advert(modules={"web": "on"}, capabilities=[contract.CAP_WEB_CLIENT], web=block)
     assert published["web"] == block and published["web"] is not block
     assert contract.read_capabilities(published) == ["web.client"]
+
+
+def test_the_web_push_key_is_published_only_when_given():
+    key = "B" + "x" * 86
+
+    assert contract.CAP_PUSH_WEBPUSH_KEY == "push.webpush.key"
+    assert "webPush" not in contract.advert(modules={}, capabilities=[])
+    published = contract.advert(
+        modules={"push": "on"}, capabilities=[contract.CAP_PUSH_WEBPUSH_KEY], web_push={"publicKey": key}
+    )
+    assert published["webPush"] == {"publicKey": key}
+    # Additive: no `v` bump, and an existing reader sees the capability list it always did.
+    assert published["v"] == contract.CONTRACT_VERSION
+    assert contract.read_capabilities(published) == ["push.webpush.key"]

@@ -84,6 +84,9 @@ class PushModule:
         # started a second sender while the first was still delivering.
         self._stopped = False
         self._vapid_key = None
+        # The VAPID public key in base64url, once `web_push_public_key` has
+        # tried to load it; ``""`` when it could not. ``None`` until then.
+        self._web_push_public_key: Optional[str] = None
         self._gateway_key: Optional[str] = None
         # What has already been reported as not served — a relay a row names, a
         # setting that is not an origin — so it costs one log line per process
@@ -212,6 +215,10 @@ class PushModule:
             found.append(contract.CAP_PUSH_SESSION_KIND)
         if webpush.available():
             found.append(contract.CAP_PUSH_WEBPUSH)
+        # Which key it signs with is claimed only once that key was loaded or
+        # minted at load (see `register`); asked of the memo, never of the disk.
+        if self._web_push_public_key:
+            found.append(contract.CAP_PUSH_WEBPUSH_KEY)
         # The relay is claimed only while the relay the Hermie apps register
         # with is on the allow-list. An app that sees the string moves its
         # device onto a relay row, and in front of a gateway that does not post
@@ -514,6 +521,33 @@ class PushModule:
             self._vapid_key = webpush.load_or_create_key(path)
         return self._vapid_key
 
+    def web_push_public_key(self) -> str:
+        """This gateway's VAPID public key in base64url, or ``""``.
+
+        What the advert publishes as `webPush.publicKey` and what a browser
+        subscribes with. Loading the key reads, and on a first run mints, a
+        file, so this is called at `register` and the answer is remembered —
+        including a failure, which leaves the key out of the advert rather
+        than retrying on somebody's hook path. Never rotates anything: a key
+        file that cannot be read stays as it is (see `load_or_create_key`).
+        """
+        if self._web_push_public_key is None:
+            self._web_push_public_key = ""
+            if webpush.available():
+                try:
+                    self._web_push_public_key = webpush.public_key_b64(self.vapid_key())
+                except Exception as exc:
+                    logger.warning("hermie: no VAPID key to publish (%s); Web Push keeps no key in the advert", exc)
+        return self._web_push_public_key
+
+    @staticmethod
+    def _signs_with(key, application_server_key: str) -> bool:
+        """Whether a row's `applicationServerKey` is the public half of *key*."""
+        try:
+            return webpush.unb64(application_server_key) == webpush.public_key_bytes(key)
+        except Exception:
+            return False
+
     def _send_webpush(
         self, registration, payload: Dict[str, Any], title: str, body: str, *, clear: bool = False
     ) -> int:
@@ -522,6 +556,18 @@ class PushModule:
         try:
             key = self.vapid_key()
         except Exception:
+            return 0
+        # A subscription made with another sender's key is refused by its push
+        # service; asking anyway costs a request per notification and says
+        # nothing new. The device fixes it by subscribing with the key in the
+        # advert, which rewrites the row. A row naming no key is tried.
+        if registration.application_server_key and not self._signs_with(key, registration.application_server_key):
+            self._report_once(
+                f"webpush-key:{registration.installation_id}",
+                "hermie: web push registration %s was made with another VAPID key (applicationServerKey); "
+                "not sending to it until the device subscribes with this gateway's key",
+                registration.installation_id,
+            )
             return 0
         result = webpush.send(
             key,
@@ -539,6 +585,21 @@ class PushModule:
         if result.device_gone:
             logger.info("hermie: %s says %s is gone; retiring it", result.status, registration.installation_id)
             self.runtime.state.retire(registration.installation_id, f"http-{result.status}")
+            return 0
+        if result.key_mismatch:
+            # Retired like a dead device, in this plugin's own state, and lifted
+            # the same way: the device writes its row again with a newer
+            # `updatedAt`. The push service's own words go along, cut short,
+            # because a 403 for a bad token (a `sub` it will not take) reads the
+            # same from here and an operator needs to tell the two apart.
+            detail = "".join(ch if ch.isprintable() else " " for ch in result.error)[:160]
+            logger.warning(
+                "hermie: the push service refused this gateway's VAPID key for %s (403 %r); "
+                "retiring it until the device subscribes again",
+                registration.installation_id,
+                detail,
+            )
+            self.runtime.state.retire(registration.installation_id, "webpush-key")
             return 0
         if not result.ok:
             logger.warning("hermie: web push returned %s for %s", result.status, registration.installation_id)
@@ -773,6 +834,10 @@ class PushModule:
 
 def register(ctx, runtime) -> PushModule:
     module = PushModule(runtime)
+    # The VAPID key is loaded, or minted on a first run, here: a browser needs
+    # its public half before anything was ever sent to it, and here is off
+    # every hook path. See `web_push_public_key`.
+    module.web_push_public_key()
     ctx.register_hook("post_llm_call", module.on_post_llm_call)
     ctx.register_hook("on_session_end", module.on_session_end)
     ctx.register_hook("pre_approval_request", module.on_pre_approval_request)

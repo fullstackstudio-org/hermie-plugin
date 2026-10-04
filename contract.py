@@ -40,6 +40,8 @@ read for one more version. The readers are ``push/registrations.py`` and
             transport: expo         # or "webpush", or "relay"
             token: "..."            # expo only
             endpoint: "..."         # webpush only, with keys.p256dh + keys.auth
+            applicationServerKey: "..."  # webpush only, optional: the VAPID public
+                                    # key it subscribed with (absent = unknown, tried)
             relay: "https://..."    # relay only, with handle + secret (and enc,
                                     # carried for the encrypted step); ios/macos
             platform: ios
@@ -126,6 +128,14 @@ CAP_PUSH_EXPO = "push.expo"
 CAP_PUSH_RELAY = "push.relay"
 RELAY_DEFAULT_ORIGIN = "https://push.hermie.dev"
 CAP_PUSH_WEBPUSH = "push.webpush"
+# This gateway's VAPID public key is in the advert (`webPush.publicKey`), and a
+# browser subscribes with THAT key. Claimed only beside the member, and only
+# when the key could be loaded or minted at load: `push.webpush` alone says the
+# gateway can sign, this says which key it signs with. A `webpush` row may name
+# the key it was made with (`applicationServerKey`); a row naming another key
+# is not sent to, and a push service's 403 retires the row until the device
+# writes it again.
+CAP_PUSH_WEBPUSH_KEY = "push.webpush.key"
 CAP_PUSH_PREVIEW = "push.preview"
 CAP_PUSH_MUTE = "push.mute"
 CAP_PUSH_TURN_DONE = "push.type.turn_done"
@@ -252,6 +262,7 @@ def advert(
     latest: str = "",
     relay_origins: Iterable[str] | None = None,
     web: Dict[str, Any] | None = None,
+    web_push: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """The value written to the ``hermie-plugin`` ui_meta key.
 
@@ -272,6 +283,11 @@ def advert(
     (`path`, `version`, `commit`, `files`, `bytes`), and is present only beside
     the `web.client` capability: when `modules.web` is on and the files matched
     their `build.json` at load. Additive like `relayOrigins`; no `v` bump.
+
+    `webPush` is `{publicKey}`: this gateway's VAPID public key, base64url of
+    the uncompressed P-256 point (87 characters), which is the
+    `applicationServerKey` a browser subscribes with. Present only beside the
+    `push.webpush.key` capability. Additive; no `v` bump.
     """
     source: Dict[str, Any] = {"repo": REPO, "ref": installed_ref}
     if latest:
@@ -291,6 +307,8 @@ def advert(
         value["relayOrigins"] = list(relay_origins)
     if web is not None:
         value["web"] = dict(web)
+    if web_push is not None:
+        value["webPush"] = dict(web_push)
     return value
 
 

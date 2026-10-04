@@ -180,6 +180,7 @@ def publish(
     latest: str = "",
     relay_origins: Optional[List[str]] = None,
     web: Optional[Dict[str, Any]] = None,
+    web_push: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Tell the app what this gateway can do.
 
@@ -199,6 +200,7 @@ def publish(
             latest=latest,
             relay_origins=relay_origins,
             web=web,
+            web_push=web_push,
         )
         uimeta.write_key(uimeta.PLUGIN_KEY, value, runtime.home)
         return int(value["updatedAt"])
@@ -225,12 +227,19 @@ def register(ctx: Any) -> None:
     # Which push relays this gateway posts to, published beside the
     # capabilities; absent when push is off. See `contract.advert`.
     relay_origins: Optional[List[str]] = None
+    # This gateway's VAPID public key, beside `push.webpush.key`: the key every
+    # browser subscribes with. Absent when push is off, when nothing here can
+    # sign, or when the key file could not be read (it is never replaced).
+    web_push_block: Optional[Dict[str, Any]] = None
     if states.get("push") == "on":
         from . import push as push_module
 
         push = push_module.register(ctx, runtime)
         capabilities.extend(push.capabilities())
         relay_origins = list(push.relay_origins)
+        public_key = push.web_push_public_key()
+        if public_key and contract.CAP_PUSH_WEBPUSH_KEY in capabilities:
+            web_push_block = {"publicKey": public_key}
 
     if states.get("context") == "on":
         from . import context as context_module
@@ -257,7 +266,7 @@ def register(ctx: Any) -> None:
     if latest:
         capabilities.append(contract.CAP_UPDATE_CHECK)
 
-    stamp = publish(runtime, states, capabilities, installed_ref, latest, relay_origins, web_block)
+    stamp = publish(runtime, states, capabilities, installed_ref, latest, relay_origins, web_block, web_push_block)
 
     # An advert that outlives the plugin is a lie the app would act on, so the
     # key is removed on unload. A gateway that is killed rather than unloaded
