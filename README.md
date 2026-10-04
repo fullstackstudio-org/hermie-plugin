@@ -751,9 +751,9 @@ block that says where the client is:
 "web": {
   "path": "/dashboard-plugins/hermie/app/index.html",
   "version": "0.2.0",
-  "commit": "fd90d66a86f7",
-  "files": 6,
-  "bytes": 665559
+  "commit": "7013e53b9308",
+  "files": 35,
+  "bytes": 1088140
 }
 ```
 

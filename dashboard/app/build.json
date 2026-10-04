@@ -1,34 +1,150 @@
 {
   "files": {
-    "assets/de-q4e1toa0.js": {
-      "bytes": 95216,
-      "sha256": "319f9afc336fae629263a18ef2b6cc0499fb4bf03c8b3d8ae3b92eff387dece8"
+    "assets/About-BZLLqKH4.js": {
+      "bytes": 3140,
+      "sha256": "6717e966828dd483e1735bc9a27ddfa21e84513bbc92148cf1f9206535f0861a"
     },
-    "assets/index-3CTxcUEs.js": {
-      "bytes": 281822,
-      "sha256": "dc46ca5114d07c531c66c1c1fc8e9ce297f6068f84a55757a69ecb0df64a0d5b"
+    "assets/Account-B8m374qX.js": {
+      "bytes": 2526,
+      "sha256": "07db6c631c41cf98d047c7e80c5c2bde5ea2542f92cade36a00e80e51ddc4fdc"
     },
-    "assets/index-CRz-VN0b.css": {
-      "bytes": 11070,
-      "sha256": "10fe3b9b35c4dde66e19d1e332bff038452f917e3e7acd64b3fcd35aeeb248bc"
+    "assets/Appearance-BrsHdeMX.js": {
+      "bytes": 1526,
+      "sha256": "e2e173e56eebff9eac978d006b1e08d754d0d1e5bc1b28e764ff6a4f5e54ec91"
     },
-    "assets/nl-B1zos00S.js": {
-      "bytes": 90915,
-      "sha256": "0ead626fa45686cbb26d71bc94181d568d687c82448b90b1831ac07733353bc1"
+    "assets/Arrangement-BluGI71T.js": {
+      "bytes": 13940,
+      "sha256": "95c6220922f9d27ccae4250d4a133bd05caa9eaad16af38a363852f30ae5dec7"
     },
-    "assets/react-DNOZjj4h.js": {
-      "bytes": 185293,
-      "sha256": "abe9612578de4d759c35a5e97b1ddcd502b1a656104822f5c71a664f2998c0de"
+    "assets/Arrangement-CaEYdjDa.css": {
+      "bytes": 2373,
+      "sha256": "9ac11e64513993cb02eeeb5971d64b5748cfb7d8aab9c86d557165984e94da85"
+    },
+    "assets/ChatOptionsPanel-ToNuMIZO.js": {
+      "bytes": 1806,
+      "sha256": "3dceb8eed3d2fc9f9932bdb2582298850f2aad2f25930a334722ac2cf395dda5"
+    },
+    "assets/ChatScreen-CqTGqzxJ.js": {
+      "bytes": 145991,
+      "sha256": "1c39d8abee2b131b572a1f9d04ed5581f99686de68e08e6ca6ebb22969b9f260"
+    },
+    "assets/ChatScreen-DGJQc3-1.css": {
+      "bytes": 38077,
+      "sha256": "14d1c9f3ac748c361e42ae3cbe033d42a3c747ccf8c98074c4ffcac38d7841ce"
+    },
+    "assets/Chats-DG8rMIfn.js": {
+      "bytes": 1868,
+      "sha256": "37ec8ec0ddee5ffc282893fcc7b91a39a3c3b2334c529f1a1abc8242ad27ee03"
+    },
+    "assets/ConversationsPage-DhJwmorL.css": {
+      "bytes": 2109,
+      "sha256": "066ca9a0179ae6898c0a93787f53c668b8ccbaaf0dea972aca8ce2f9595480e5"
+    },
+    "assets/ConversationsPage-uap-H6AH.js": {
+      "bytes": 6370,
+      "sha256": "c6b27d5fcf2634bab23125993fbd37e151725c5b7830c9cef8eb0ea88ce76af5"
+    },
+    "assets/Gateway-Dp381ner.js": {
+      "bytes": 2181,
+      "sha256": "f5775e73f1a039d0f7bb0e038b9b66df7ecc18a60c96b8462099dc76de4fa7df"
+    },
+    "assets/Highlight-BddcANye.js": {
+      "bytes": 76610,
+      "sha256": "395c004f950c4caed312eda8ad24b01239ff1ab3fa548ce6772b2dc85edeff50"
+    },
+    "assets/ImageViewer--dqfdbPc.js": {
+      "bytes": 1928,
+      "sha256": "f62fa41bf3e6c53f9620f81aaedb733ead905cc126ef1a73388ea0e8b0aaccbd"
+    },
+    "assets/MCP-BYVHbloi.js": {
+      "bytes": 5304,
+      "sha256": "0a4dec8948587a4c53a381742c5430f01b52d35bdf76f54ee57ef1201d571fce"
+    },
+    "assets/MCP-CLHa2T5r.css": {
+      "bytes": 1700,
+      "sha256": "a22274828c9643e9456459e7327c4b6e5ae0da026b3a45a0babf14c6e052f280"
+    },
+    "assets/Math-CNfxpsFp.js": {
+      "bytes": 22805,
+      "sha256": "72177c63550c18c7c8ad678acaf9603487dfb94e26d31689078915563ea73414"
+    },
+    "assets/Mermaid-C_hSgK1V.js": {
+      "bytes": 23389,
+      "sha256": "a26cc05b3378d1b67469d52413e590e1665dc7c28046cb119daccc84f9efd8de"
+    },
+    "assets/MessageMenuPopup-Dajn80R0.js": {
+      "bytes": 2755,
+      "sha256": "1235278baea731b78b3fa0c5cfb17bfa1f4b740ab6d3585e7be7c053e324e78e"
+    },
+    "assets/Passkeys-Bgcrfcla.css": {
+      "bytes": 1699,
+      "sha256": "9d637135ef87164c296326b8d4c47182d412d261bf7d2129713d40a25b082816"
+    },
+    "assets/Passkeys-HChH9BZC.js": {
+      "bytes": 5803,
+      "sha256": "382fa3a71f05df56f67379a15c4d4b3ff550fe23941d4a47d874e60d51bd5631"
+    },
+    "assets/SettingsHost-DMkGdG0v.js": {
+      "bytes": 6337,
+      "sha256": "393dba58cdffec4fe51b284bddd0250d64906a961239e1f51f2099920cebfd30"
+    },
+    "assets/SettingsHost-DipQP7t2.css": {
+      "bytes": 4787,
+      "sha256": "b17f9c0bfff0b19bd1a4b4610e10a76db95269378a444fbda95d9fdd2cd04e68"
+    },
+    "assets/clipboard-CnHDJ2WW.js": {
+      "bytes": 181,
+      "sha256": "d291eee61fb882ef9c354788d8af74baef6ed9d97c693e071f2b06393736abfe"
+    },
+    "assets/de-DY1TfTUg.js": {
+      "bytes": 23863,
+      "sha256": "922182683bf624a20466c84803fc0bdeebb63eaff8b274c2dc28563305afd8c5"
+    },
+    "assets/index-CboOVJwT.js": {
+      "bytes": 358710,
+      "sha256": "d7c31526c93ef0ff824d7fe5cb121ae7984a61bdf41cca07949632861a5a0343"
+    },
+    "assets/index-YBeHFhBH.css": {
+      "bytes": 24323,
+      "sha256": "aa41e7c78c352b77171f19fef64093ec88a6b16d0f8840a52af78e854e3408dc"
+    },
+    "assets/layout-gvAxFYtY.js": {
+      "bytes": 824,
+      "sha256": "a2e8f5de9d60c6048df6e77eb5d7bf609425ba3a80e2924b23fe3e076bc06abe"
+    },
+    "assets/nl-2c2K-gmW.js": {
+      "bytes": 22821,
+      "sha256": "5ad473c4a3299666163895ff6a25e4233e76e04cbdaec42ea8a233a244155680"
+    },
+    "assets/react-ekJcVUFU.js": {
+      "bytes": 185317,
+      "sha256": "fc2c65581284d7c9b6c6b5e46a138549255d9325a3d3a3291a9c944f158fe27d"
+    },
+    "assets/sheet-strings-Bxxb5KEA.js": {
+      "bytes": 46919,
+      "sha256": "ac2a26bdf7f17ebd6dcf97057888d18a78c47f47a81a230f14099bac9e18e10e"
+    },
+    "assets/sheets-B7JoTrO3.js": {
+      "bytes": 22157,
+      "sha256": "ec72ba5af3cf4cc1565202f49383a9ba00ef8791e94983c20b17cd347e01c4ba"
+    },
+    "assets/ui-meta-bridge--9m9Wz3J.js": {
+      "bytes": 16992,
+      "sha256": "61cd02c0e822a21ac1ef36692f125c81379163abbdaade22c0d3a0d554d4328b"
     },
     "index.html": {
-      "bytes": 1243,
-      "sha256": "854709a32b1281d1157050caff8e1575ea025f75beaba07b7361b870f491ef0b"
+      "bytes": 1265,
+      "sha256": "1e7ffe8e6d2d61f911ee9c570f0d4c51a250b9fd00414744f5a029cc9f1b7e67"
+    },
+    "licenses.json": {
+      "bytes": 9744,
+      "sha256": "95951bf2e2b12861858e9fd6cd274bc5875509cd2cb0ced0e9ccae5edb6d7628"
     }
   },
   "name": "hermie-web-client",
-  "sourceCommit": "fd90d66a86f79757baf4cf1c401c1d5d39cb1c5c",
+  "sourceCommit": "7013e53b93087cbb7a4b47dc39eb5c6db7ab38fb",
   "sourceRepo": "fullstackstudio-org/hermie",
-  "totalBytes": 665559,
+  "totalBytes": 1088140,
   "v": 1,
   "version": "0.2.0"
 }
