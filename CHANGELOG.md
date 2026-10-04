@@ -6,6 +6,14 @@ people.
 
 ## Unreleased
 
+### Changed
+
+- **`scripts/guard_scan.py` no longer loads the scanner into its own process.** Each scanner now runs
+  in a child interpreter that executes `scripts/guard_scan_runner.py` with the checkout on `PYTHONPATH`,
+  so the script no longer edits `sys.path` (which the newest fork scanner reports as a high finding and
+  a `caution` verdict for the plugin). The gate is unchanged: the same two pins and gates, the same
+  exit codes, and a result that is missing, doubled or malformed fails closed.
+
 ## 0.12.0 — 2026-10-04
 
 ### Added

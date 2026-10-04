@@ -42,7 +42,10 @@ Only ``tools/`` is fetched. The scanner modules use the standard library only,
 and ``tools/__init__.py`` is documented to be free of side effects, so nothing
 of Hermes itself needs to be installed. Each scanner runs in its own
 interpreter, because the fork and upstream both define a package called
-``tools``.
+``tools``. That interpreter is a child process that runs ``guard_scan_runner.py``
+with the scanner's checkout as its import root (through ``PYTHONPATH``, set for
+the child only): this process never edits its own import path and never loads
+the scanner's code itself.
 
 Exit status: 0 when every blocking scanner says ``safe`` and no informational
 one says ``dangerous``; 1 when that is not so, or a scanner could not be
@@ -64,6 +67,9 @@ import time
 from pathlib import Path
 
 RESULT_PREFIX = "GUARD_SCAN_RESULT "
+# The program a scanner runs in: a file of this repository, read as part of the tree being scanned, so the
+# plugin scanner reads it like every other file. It prints one RESULT_PREFIX line (see ``parse_result``).
+RUNNER = Path(__file__).resolve().with_name("guard_scan_runner.py")
 PINS_DEFAULT = Path(__file__).resolve().parent.parent / ".github" / "scanner-pins.json"
 PLUGIN_DEFAULT = Path(__file__).resolve().parent.parent
 
@@ -227,73 +233,70 @@ def check_plugin_dir(plugin: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# One scanner, in its own interpreter
+# One scanner, in its own interpreter (the runner is scripts/guard_scan_runner.py)
 # ---------------------------------------------------------------------------
 
 
-def run_one(root: Path, plugin: Path) -> int:
-    """Scan ``plugin`` with the scanner at ``root`` and print the report and one result line.
+FINDING_KEYS = ("severity", "category", "pattern", "file")
 
-    Runs in a fresh ``python -I`` process, which ignores ``PYTHON*`` variables and
-    the user's site directory but keeps the environment's own site-packages. What
-    guarantees that the ``tools`` package in use is the fetched one is that
-    ``root`` is put first on ``sys.path`` and that the module's file is then
-    checked to live under ``root``: anything else is refused.
+
+def parse_result(source_name: str, stdout: str, stderr: str, returncode: int) -> dict:
+    """Turn what the child printed into a result, or raise: anything malformed fails closed.
+
+    Exactly one result line is accepted, and its payload must have the verdict, the install decision, the
+    report, the version and a well-formed list of findings. A scanner that dies, prints nothing or prints
+    something else never yields a result.
     """
-    sys.path.insert(0, str(root))
-    from tools import plugin_guard  # noqa: PLC0415 - must follow the sys.path edit
+    lines = [line for line in stdout.splitlines() if line.startswith(RESULT_PREFIX)]
+    detail = (stderr or stdout).strip()[-600:]
+    if len(lines) != 1:
+        raise GuardError(f"{source_name}: the scanner produced {'no' if not lines else 'more than one'} result"
+                         f" (exit {returncode}): {detail}")
+    try:
+        payload = json.loads(lines[0][len(RESULT_PREFIX):])
+    except ValueError:
+        payload = None
+    findings = payload.get("findings") if isinstance(payload, dict) else None
+    well_formed = (
+        isinstance(payload, dict)
+        and all(isinstance(payload.get(k), str) for k in ("verdict", "reason", "report", "scanner_version"))
+        and (payload.get("allowed") is None or isinstance(payload.get("allowed"), bool))
+        and isinstance(findings, list)
+        and all(
+            isinstance(f, dict) and all(isinstance(f.get(k), str) for k in FINDING_KEYS)
+            and isinstance(f.get("line"), int) and not isinstance(f.get("line"), bool)
+            for f in findings
+        )
+    )
+    if not well_formed:
+        raise GuardError(f"{source_name}: the scanner's result was malformed (exit {returncode}): {detail}")
+    payload["exit"] = returncode
+    return payload
 
-    loaded = Path(plugin_guard.__file__).resolve()
-    if root.resolve() not in loaded.parents:
-        print(f"refusing to continue: tools.plugin_guard came from {loaded}, not from {root}", file=sys.stderr)
-        return 1
 
-    result = plugin_guard.scan_plugin(plugin, source="hermie-plugin")
-    allowed, reason = plugin_guard.should_allow_plugin_install(result)
-    print(plugin_guard.format_scan_report(result))
-    payload = {
-        "verdict": str(result.verdict),
-        "allowed": allowed,
-        "reason": str(reason),
-        "scanner_version": str(getattr(plugin_guard, "PLUGIN_SCANNER_VERSION", "unknown")),
-        "findings": [
-            {
-                "severity": str(f.severity),
-                "category": str(f.category),
-                "pattern": str(f.pattern_id),
-                "file": str(f.file),
-                "line": int(f.line),
-            }
-            for f in result.findings
-        ],
-    }
-    print(RESULT_PREFIX + json.dumps(payload, sort_keys=True))
-    return 0 if (result.verdict == "safe" and allowed is True) else 1
+def child_env(root: Path) -> dict[str, str]:
+    """The environment of the scanner's interpreter: the caller's, without any ``PYTHON*`` variable, and
+    with ``PYTHONPATH`` set to the scanner checkout alone. That is the only way the fetched ``tools``
+    package gets onto the child's import path; this process never edits its own."""
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")}
+    env["PYTHONPATH"] = str(root)
+    return env
 
 
 def scan_with(source: Source, plugin: Path) -> dict:
-    """Run one scanner in a child process and return its parsed result plus its report text."""
-    cmd = [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--run-one", str(source.root), str(plugin)]
+    """Scan ``plugin`` with ``source`` in a child interpreter and return its parsed result.
+
+    The child runs ``RUNNER`` (a file of this repository) with the scanner checkout as its only extra
+    import root. ``-s`` keeps the user's site directory out of it; ``child_env`` has already removed every
+    ``PYTHON*`` variable of the caller's. This process loads nothing from the checkout.
+    """
+    cmd = [sys.executable, "-s", "-B", str(RUNNER), str(plugin), str(source.root)]
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=SCAN_TIMEOUT, check=False)
+        done = subprocess.run(cmd, env=child_env(source.root), capture_output=True, text=True,
+                              timeout=SCAN_TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GuardError(f"{source.name}: the scanner could not be run: {exc}") from exc
-    payload = None
-    report_lines = []
-    for line in done.stdout.splitlines():
-        if line.startswith(RESULT_PREFIX):
-            try:
-                payload = json.loads(line[len(RESULT_PREFIX):])
-            except ValueError:
-                payload = None
-        else:
-            report_lines.append(line)
-    if payload is None:
-        detail = (done.stderr or done.stdout).strip()[-600:]
-        raise GuardError(f"{source.name}: the scanner produced no result (exit {done.returncode}): {detail}")
-    payload["report"] = "\n".join(report_lines)
-    payload["exit"] = done.returncode
-    return payload
+    return parse_result(source.name, done.stdout, done.stderr, done.returncode)
 
 
 def passes(result: dict, gate: str = "blocking") -> bool:
@@ -419,11 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workdir", type=Path, default=None, help="where to put fetched scanners (outside the plugin)")
     parser.add_argument("--scanner-root", action="append", default=[], metavar="NAME=DIR", help="use a checkout you have")
     parser.add_argument("--only-roots", action="store_true", help="run the --scanner-root checkouts alone")
-    parser.add_argument("--run-one", nargs=2, metavar=("ROOT", "PLUGIN"), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-
-    if args.run_one:
-        return run_one(Path(args.run_one[0]), Path(args.run_one[1]))
 
     plugin = args.plugin.resolve()
     if (args.scanner_root or args.only_roots) and os.environ.get("GITHUB_ACTIONS"):

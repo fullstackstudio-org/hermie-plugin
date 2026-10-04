@@ -73,7 +73,12 @@ It needs no Hermes install. The scanner is a few standard-library modules under
 shallow, sparse fetch of a few megabytes) at the commit pinned in
 `.github/scanner-pins.json`, once for the fork the gateways run and once for
 upstream. Each runs in its own interpreter, because both define a package called
-`tools`. It needs Python 3.11 or newer and `git`.
+`tools`: `scripts/guard_scan_runner.py` is the program that interpreter runs, and
+the fetched checkout reaches it only through `PYTHONPATH`, set for that child
+alone. `guard_scan.py` itself never puts a scanner on its own `sys.path` (the
+fork's scanner reads that as a path outside the plugin), and the runner refuses
+a `tools` module that did not load from under the checkout. It needs Python 3.11
+or newer and `git`.
 
 Run it yourself:
 

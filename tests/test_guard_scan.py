@@ -284,6 +284,108 @@ def test_the_scanner_is_the_one_asked_for_and_not_one_that_happens_to_be_importa
     assert run(plugin, {"fork": strict}) == 1
 
 
+# -- the child interpreter that runs a scanner ---------------------------------
+
+
+def good_payload(**changes):
+    payload = {"verdict": "safe", "allowed": True, "reason": "ok", "report": "r", "scanner_version": "v",
+               "findings": [{"severity": "low", "category": "c", "pattern": "p", "file": "f", "line": 1}]}
+    payload.update(changes)
+    return guard.RESULT_PREFIX + json.dumps(payload)
+
+
+def test_the_runner_prints_the_same_prefix_the_gate_looks_for():
+    runner_spec = importlib.util.spec_from_file_location("guard_scan_runner_under_test", guard.RUNNER)
+    runner = importlib.util.module_from_spec(runner_spec)
+    runner_spec.loader.exec_module(runner)
+
+    assert runner.RESULT_PREFIX == guard.RESULT_PREFIX
+
+
+def test_the_gate_never_puts_a_scanner_on_its_own_import_path(plugin, scanners):
+    before = list(sys.path)
+
+    assert run(plugin, scanners) == 0
+
+    assert sys.path == before
+    assert not any(str(root) in entry for root in scanners.values() for entry in sys.path)
+
+
+def test_the_child_gets_the_scanner_alone_on_its_import_path(scanners, monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    monkeypatch.setenv("PYTHONSTARTUP", "/somewhere/startup.py")
+
+    env = guard.child_env(scanners["fork"])
+
+    assert env["PYTHONPATH"] == str(scanners["fork"])
+    assert not [key for key in env if key.startswith("PYTHON") and key != "PYTHONPATH"]
+
+
+def test_a_tools_module_from_outside_the_scanner_checkout_is_refused(plugin, tmp_path):
+    """The checkout's `tools` package pointing elsewhere must not be taken for the scanner."""
+    outside = make_scanner(tmp_path / "outside")  # says `safe` for everything
+    root = tmp_path / "scanner-redirected"
+    (root / "tools").mkdir(parents=True)
+    (root / "tools" / "__init__.py").write_text(f"__path__ = [{str(outside / 'tools')!r}]\n")
+    (root / "tools" / "plugin_guard.py").write_text("raise RuntimeError('this file is never the one loaded')\n")
+
+    with pytest.raises(guard.GuardError) as caught:
+        guard.scan_with(guard.Source("fork", root), plugin)
+
+    assert "refusing to continue" in str(caught.value)
+    assert run(plugin, {"fork": root}) == 1
+
+
+def test_the_runner_refuses_when_asked_about_a_different_root(plugin, scanners, tmp_path):
+    env = guard.child_env(scanners["fork"])
+
+    done = subprocess.run([sys.executable, "-s", "-B", str(guard.RUNNER), str(plugin), str(tmp_path / "other")],
+                          env=env, capture_output=True, text=True, check=False)
+
+    assert done.returncode == 1 and guard.RESULT_PREFIX not in done.stdout
+    assert "refusing to continue" in done.stderr
+
+
+@pytest.mark.parametrize("stdout", [
+    "",
+    "just a report\n",
+    good_payload() + "\n" + good_payload(),
+    guard.RESULT_PREFIX + "not json",
+    guard.RESULT_PREFIX + "[]",
+    guard.RESULT_PREFIX + "null",
+    good_payload(verdict=None),
+    good_payload(verdict=5),
+    good_payload(allowed="yes"),
+    good_payload(allowed=1),
+    good_payload(reason=None),
+    good_payload(report=["a"]),
+    good_payload(scanner_version=None),
+    good_payload(findings="none"),
+    good_payload(findings=[None]),
+    good_payload(findings=[{"severity": "high"}]),
+    good_payload(findings=[{"severity": "high", "category": "c", "pattern": "p", "file": "f", "line": "3"}]),
+    good_payload(findings=[{"severity": "high", "category": "c", "pattern": "p", "file": "f", "line": True}]),
+])
+def test_a_result_that_is_missing_doubled_or_malformed_fails_closed(stdout):
+    with pytest.raises(guard.GuardError):
+        guard.parse_result("fork", stdout, "", 0)
+
+
+def test_a_well_formed_result_is_accepted_and_carries_the_exit_status():
+    result = guard.parse_result("fork", "noise\n" + good_payload(allowed=None, verdict="caution") + "\n", "", 1)
+
+    assert result["verdict"] == "caution" and result["allowed"] is None and result["exit"] == 1
+    assert not guard.passes(result)
+
+
+def test_a_scanner_that_dies_after_printing_a_report_fails_the_gate(plugin, scanners):
+    (scanners["fork"] / "tools" / "plugin_guard.py").write_text(
+        FAKE_SCANNER.replace("def format_scan_report(result):", "def format_scan_report(result):\n    raise SystemExit(7)")
+    )
+
+    assert run(plugin, scanners) == 1
+
+
 # -- the tree being scanned --------------------------------------------------
 
 
