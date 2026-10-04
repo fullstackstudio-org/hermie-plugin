@@ -426,7 +426,7 @@ def test_the_repositorys_own_pins_name_the_fork_and_upstream_at_full_commits():
     by_name = {p["name"]: p for p in pins}
     assert by_name["fork"]["gate"] == "blocking" and by_name["upstream"]["gate"] == "informational"
     # The fork that judges a web client bundle's JavaScript by token (HERM-192); the app pins the same commit.
-    assert by_name["fork"]["ref"] == "a1b797bd1af884f857e7a847577e2a158578588d"
+    assert by_name["fork"]["ref"] == "d93fcdae29a411dbd6a30b1f6c994764b1071895"
 
 
 def test_the_nightly_run_reads_a_branch_for_each_scanner():
