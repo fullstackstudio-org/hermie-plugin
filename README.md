@@ -159,6 +159,7 @@ that cannot work is worse than one that is absent.
 | `push.expo` | Expo notifications can be sent |
 | `push.relay` | a `transport: relay` row is delivered, and `https://push.hermie.dev` — the relay the Hermie apps use — is on this gateway's allow-list; `relayOrigins` in the advert lists every relay it posts to |
 | `push.webpush` | Web Push can be signed here |
+| `push.webpush.key` | this gateway's VAPID public key is in the advert as `webPush.publicKey`, and a browser subscribes with it (see "Web Push and its key") |
 | `push.preview` | a device may ask for message text in its payload |
 | `push.mute` | a mute written by the app will be obeyed |
 | `push.seen.per_chat` | a `{bot, at}` heartbeat is understood, so suppression is per chat |
@@ -203,6 +204,34 @@ cannot switch its way past — and a mute still silences the lot.
 An absent list means an absent plugin. A plugin too old to publish one, a
 plugin that is installed but disabled, and no plugin at all are
 indistinguishable, and all three mean the same thing: do not offer the feature.
+
+### Web Push and its key
+
+A browser subscription is made with one sender's VAPID public key, and its push
+service refuses (403) a push signed with any other. So the advert carries this
+gateway's key, beside `push.webpush.key`:
+
+```yaml
+webPush:
+  publicKey: BNc…   # base64url of the uncompressed P-256 point, 87 characters
+```
+
+The key is loaded, or minted on a first run, when the plugin loads, and it is
+published only when that worked: never when push is off, never where nothing can
+sign, and never when the key file cannot be read (that file is refused, not
+replaced). It is never rotated automatically; a new key is a gateway every
+browser has to subscribe to again.
+
+A `webpush` row may say which key it was made with, as `applicationServerKey`
+(80 to 100 base64url characters; anything else reads as absent). A row that
+names no key is tried, as every row was before. A row that names another key is
+not sent to and is said once in the log, because its push service would refuse
+it anyway. A 403 from the push service retires the row in the plugin's own state
+(`webpush-key`), like a 404 or 410: it is not asked again until the device
+writes its row with a newer `updatedAt`, which a client does when it subscribes
+again with the advert's key. The log line carries the push service's own words,
+because a 403 for a `sub` it will not take (see `vapid_contact`) reads the same
+from here.
 
 ## Requirements
 
@@ -258,7 +287,9 @@ plugins:
           # this replaces the default; an empty list serves no relay at all.
           relay_origins: ["https://push.hermie.dev"]
 
-          # Web Push only. The key is created on first use if this is empty.
+          # Web Push only. Where the VAPID private key lives; empty means the
+          # plugin's own data directory. Created when the plugin loads if it
+          # is not there, published in the advert, never rotated.
           vapid_key_path: ""
           vapid_contact: "mailto:you@example.com"
         memory:

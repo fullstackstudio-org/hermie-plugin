@@ -27,7 +27,9 @@ There are three transports, and a row is exactly one of them:
 
 - ``expo`` — ``token``, an Expo push token;
 - ``webpush`` — ``endpoint`` plus ``keys.p256dh`` and ``keys.auth``, a browser's
-  subscription;
+  subscription, and optionally ``applicationServerKey``: the VAPID public key
+  it was made with, so the sender can tell a subscription made for another
+  gateway's key from one made for its own;
 - ``relay`` — ``relay``, ``handle`` and ``secret``: a device that registered
   with a push relay and was handed a send capability for itself alone. Only
   ``ios`` and ``macos`` register there. ``relay`` names the relay the device
@@ -63,6 +65,13 @@ RELAY_PLATFORMS = ("ios", "macos")
 # here, on the way in. `tests/test_relay.py` pins this to the relay's limit.
 MAX_RELAY_FIELD = 200
 RELAY_FIELD = re.compile(r"[A-Za-z0-9_-]{1,%d}" % MAX_RELAY_FIELD)
+
+# The VAPID public key a browser subscription was made with, as a `webpush` row
+# names it: base64url, no padding. An uncompressed P-256 point is 87 characters;
+# the bounds are looser so that a key this reader cannot judge is treated as
+# unknown (tried, as every row before this field was) rather than as another
+# gateway's key (skipped).
+APPLICATION_SERVER_KEY = re.compile(r"[A-Za-z0-9_-]{80,100}")
 
 # Every event a device can ask about, and every one it can be sent — ONE list,
 # which `push/events.py` re-exports as `TYPES`. They were two tuples once, and
@@ -129,6 +138,12 @@ class Registration:
     # shipped with the Expo web build gives every request both buttons, and never
     # writes this.
     request_methods: bool = False
+    # A Web Push row only: the VAPID public key the browser subscribed with
+    # (`applicationServerKey`). Empty means unknown — every row written before
+    # the field, and one whose value is not the shape a key has — and such a
+    # row is tried. The sender skips a row whose key is not this gateway's,
+    # because the push service would refuse it anyway.
+    application_server_key: str = ""
 
     @property
     def may_preview(self) -> bool:
@@ -373,6 +388,11 @@ def relay_origin(value: Any) -> str:
     return origin_of(text)
 
 
+def _application_server_key(value: Any) -> str:
+    text = _text(value)
+    return text if APPLICATION_SERVER_KEY.fullmatch(text) else ""
+
+
 def _relay_field(value: Any) -> str:
     text = _text(value)
     return text if RELAY_FIELD.fullmatch(text) else ""
@@ -417,7 +437,11 @@ def registration_of(installation_id: str, value: Any, user_id: str = "") -> Opti
     if transport == "webpush":
         if endpoint and p256dh and auth and not token and not has_handle:
             return Registration(
-                transport="webpush", endpoint=endpoint, keys={"p256dh": p256dh, "auth": auth}, **common
+                transport="webpush",
+                endpoint=endpoint,
+                keys={"p256dh": p256dh, "auth": auth},
+                application_server_key=_application_server_key(value.get("applicationServerKey")),
+                **common,
             )
         return None
     if transport == "relay":

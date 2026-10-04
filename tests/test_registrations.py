@@ -200,3 +200,57 @@ def test_there_is_no_type_for_something_nothing_can_send():
     assert "dm" not in events.TYPES
     # A device that still asks for it is simply asking for nothing.
     assert registration_of("i1", expo_entry(types={"dm": True})).wants("dm") is False
+
+
+# -- which VAPID key a browser subscription was made with --------------------
+
+# An uncompressed P-256 point in base64url is 87 characters; the reader takes
+# 80 to 100 so a key it cannot judge is never mistaken for a different one.
+A_KEY = "B" + "x" * 86
+
+
+def webpush_entry(**overrides):
+    entry = {
+        "v": 1,
+        "transport": "webpush",
+        "endpoint": "https://push.example/x",
+        "keys": {"p256dh": "a", "auth": "b"},
+        "platform": "web",
+        "types": {"message": True},
+        "updatedAt": 1,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_a_webpush_row_can_say_which_key_it_was_made_with():
+    assert registration_of("i1", webpush_entry(applicationServerKey=A_KEY)).application_server_key == A_KEY
+
+
+def test_a_row_that_says_nothing_about_its_key_reads_as_unknown():
+    assert registration_of("i1", webpush_entry()).application_server_key == ""
+
+
+def test_a_key_that_is_not_base64url_of_the_right_length_reads_as_absent():
+    for bad in (
+        "x" * 79,
+        "x" * 101,
+        A_KEY[:-1] + "=",
+        A_KEY[:-1] + "+",
+        A_KEY[:-1] + "/",
+        " " + A_KEY[1:],
+        A_KEY + "\n",
+        87,
+        None,
+        ["x" * 87],
+    ):
+        registration = registration_of("i1", webpush_entry(applicationServerKey=bad))
+        # Absent, never a reason to drop the row: it is tried as before.
+        assert registration is not None
+        assert registration.application_server_key == ""
+    assert registration_of("i1", webpush_entry(applicationServerKey="x" * 80)).application_server_key == "x" * 80
+    assert registration_of("i1", webpush_entry(applicationServerKey="x" * 100)).application_server_key == "x" * 100
+
+
+def test_only_a_webpush_row_carries_a_key():
+    assert registration_of("i1", expo_entry(applicationServerKey=A_KEY)).application_server_key == ""

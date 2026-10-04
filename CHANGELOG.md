@@ -6,13 +6,35 @@ people.
 
 ## Unreleased
 
+### Added
+
+- **`push.webpush.key`: this gateway's VAPID public key is in the advert.** `webPush: {publicKey}`,
+  base64url of the uncompressed P-256 point (87 characters), is the `applicationServerKey` a browser
+  subscribes with (HERM-152: the key used to stay private, so browsers subscribed with another
+  sender's key and every Web Push from the plugin was refused). The key is loaded, or minted on a
+  first run, when the plugin loads; the member and the capability are published together and only
+  when that worked, never with push off, without `cryptography` or with an unreadable key file. The
+  key is never rotated automatically.
+- **A `webpush` row can say which key it was made with.** An optional `applicationServerKey` (80 to
+  100 base64url characters, anything else reads as absent). A row naming no key is tried as before; a
+  row naming another key is not sent to and is reported once in the log, capped like the relay
+  reports.
+
 ### Changed
+
+- **A 403 from a push service retires the Web Push row** (reason `webpush-key`), like a 404 or 410,
+  until the device writes its row with a newer `updatedAt`. The push service's own words go into the
+  log line, since a 403 for a refused `sub` looks the same from here.
+- **Minting the VAPID key is exclusive.** A gateway and a `hermes plugins validate` probe loading at
+  the same moment end up with one key, created `0600` from the first byte; a write that fails leaves
+  no half-written file behind to be refused on the next load.
 
 - **`scripts/guard_scan.py` no longer loads the scanner into its own process.** Each scanner now runs
   in a child interpreter that executes `scripts/guard_scan_runner.py` with the checkout on `PYTHONPATH`,
   so the script no longer edits `sys.path` (which the newest fork scanner reports as a high finding and
   a `caution` verdict for the plugin). The gate is unchanged: the same two pins and gates, the same
   exit codes, and a result that is missing, doubled or malformed fails closed.
+
 
 ## 0.12.0 — 2026-10-04
 

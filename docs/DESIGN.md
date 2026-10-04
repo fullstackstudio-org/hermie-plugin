@@ -218,6 +218,7 @@ hermie-plugin:
   modules: {push: "on", context: "on", presence: planned, ...}
   limits: {payloadBytes: 3500, contextChars: 1200}
   relayOrigins: ["https://push.hermie.dev"]   # push on only; may be []
+  webPush: {publicKey: BNc…}                   # beside push.webpush.key only
   updatedAt: 1790001453
 ```
 
@@ -228,8 +229,10 @@ Four rules make this work in both directions:
    string; an older app does not ask for it. `version` exists only for the
    human-readable "a plugin update is available" line.
 2. **A capability is claimed only when it can be honoured *on this gateway*.**
-   `push.webpush` is advertised only when the signing library imports here, and
-   `push.type.turn_done` only when that type is switched on. An app that sees a
+   `push.webpush` is advertised only when the signing library imports here,
+   `push.webpush.key` (with the `webPush` member) only when the VAPID key could
+   be loaded or minted at load, and `push.type.turn_done` only when that type
+   is switched on. An app that sees a
    capability will offer a button, and a button that cannot work is worse than
    one that is absent.
 3. **An absent advert means an absent plugin.** A plugin too old to write the
@@ -834,9 +837,21 @@ cheaper than that mistake.
 - **Web Push** — VAPID (RFC 8292) and aes128gcm (RFC 8188/8291), implemented
   against `cryptography`, which the Hermes runtime already ships. `pywebpush`
   would pull `py_vapid` and `http_ece` for roughly two hundred lines of
-  arithmetic. The VAPID key is minted on first use, written `0600`, and never
-  rotated automatically. 404 and 410 retire the subscription. The encrypted
-  body is `{title, body, data}`, which is what the app's service worker reads.
+  arithmetic. The VAPID key is loaded, or minted on a first run, when the
+  plugin loads (exclusively: a gateway and a `validate` probe loading at once
+  end up with one key), written `0600`, and never rotated automatically; an
+  unreadable key file is refused, never replaced. Its public half is published
+  as the advert's `webPush.publicKey` beside `push.webpush.key`, and a browser
+  subscribes with it (HERM-152: the key used to stay private, so every browser
+  subscribed with another sender's key and every push from here was refused).
+  A row may say which key it was made with (`applicationServerKey`, 80 to 100
+  base64url characters, otherwise absent): a row naming no key is tried, a row
+  naming another key is not sent to and is reported once (the same capped
+  report set the relay uses). 404 and 410 retire the subscription, and so does
+  a 403, the push service's answer to a key the subscription was not made with
+  (reason `webpush-key`); the push service's words go into the log line, since
+  a 403 for a `sub` it refuses reads the same from here. The encrypted body is
+  `{title, body, data}`, which is what the app's service worker reads.
 - **Relay** — for the native app on iPhone, iPad and Mac, which Expo no longer
   reaches. Only an app's publisher can talk to Apple's push service for that
   app, so the device registers with a relay the Hermie project operates and
@@ -906,7 +921,10 @@ shown, which is the contract's rule for it.
 **Retirement is recorded in the plugin's own state, never by editing the app's
 registration.** That entry lives under the app's `ui_meta` key and a write there
 would fight its compare-and-swap. A retired registration is skipped until the
-device writes a fresh entry whose `updatedAt` moves past the retirement.
+device writes a fresh entry whose `updatedAt` moves past the retirement. That
+covers every reason alike: Expo's `DeviceNotRegistered`, a Web Push 404 or 410,
+a Web Push 403 for the wrong key, the relay's `gone`. A browser that subscribes
+again with the advert's key rewrites its row, and so lifts its own retirement.
 
 ### Threading
 

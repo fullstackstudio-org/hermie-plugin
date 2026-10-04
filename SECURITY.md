@@ -15,9 +15,13 @@ It runs **inside** `hermes serve`, in the gateway's own process. It can see what
 the gateway sees. That is the trust level; it is the same as the gateway's host,
 which is where it runs.
 
-It holds one secret of its own: a VAPID private key it mints on first use,
-written `0600` in its own data directory. It is used to sign Web Push requests
-and nothing else. It holds no gateway credential, because in-process it needs
+It holds one secret of its own: a VAPID private key it mints the first time it
+loads, written `0600` in its own data directory. It is used to sign Web Push
+requests and nothing else. Its **public** half is published in the advert
+(`webPush.publicKey`), which is what browsers subscribe with; that half is not a
+secret, and every push request already carries it. The key is never rotated
+automatically, and a key file that cannot be read is refused rather than
+replaced. It holds no gateway credential, because in-process it needs
 none — which is one fewer secret on disk than the external daemon it replaces.
 
 It also reads, out of the rows the app wrote, one relay send secret per native
