@@ -13,8 +13,8 @@ redundant notification" direction:
 - ``sent``: event id -> unix time, so the same approval does not buzz twice when
   two hooks describe it.
 - ``retired``: registrations a transport told us are dead (Expo's
-  ``DeviceNotRegistered``, a Web Push 404/410, a Web Push 403 for a key the
-  subscription was not made with, the relay's ``gone``), kept until the app
+  ``DeviceNotRegistered``, a Web Push 404/410, a Web Push 403 about the key
+  the subscription was made with, the relay's ``gone``), kept until the app
   rewrites that installation's entry.
 - ``update``: the newest release tag last seen, and when it was asked for, so an
   hourly check is hourly across restarts rather than per load.

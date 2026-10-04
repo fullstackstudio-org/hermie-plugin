@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import struct
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -66,27 +67,39 @@ def unb64(text: str) -> bytes:
 # --- VAPID ------------------------------------------------------------------
 
 
-def load_or_create_key(path: Path):
+class UnreadableKey(Exception):
+    """A key file is there and is not a key. It is refused, never replaced."""
+
+
+def load_or_create_key(path: Path, *, create: bool = True):
     """The gateway's VAPID private key, minted on first use.
 
     The key identifies this gateway to every push service its users' browsers
     happen to use, and its public half is what every browser subscribes with
     (the advert's `webPush.publicKey`). So it is written 0600 and it is never
     rotated automatically: a new key is a gateway every existing subscription
-    stops matching, and each push service then refuses this sender (a 403)
-    until the device subscribes again. That is a cost with no benefit unless
-    the key leaked, and an operator who decides it did removes the file.
+    stops matching, and each push service then refuses this sender until the
+    device subscribes again. That is a cost with no benefit unless the key
+    leaked, and an operator who decides it did removes the file.
 
-    Minting is exclusive. The key is created at load, and a gateway and a
-    `hermes plugins validate` probe can load at the same moment; whichever
-    creates the file first wins and the other reads that key back, so neither
-    replaces a key somebody may already have subscribed with.
+    Minting is exclusive and whole. The PEM is written to a 0600 temporary file
+    beside the key, flushed to disk, and hard-linked into place, which fails if
+    a key is already there: a gateway and a `hermes plugins validate` probe
+    loading at the same moment end up with one key, and no reader ever sees a
+    half-written file it would then refuse for good. Where the file system has
+    no hard links, the file is created with `O_EXCL` instead.
+
+    With `create=False` a missing file answers ``None`` and nothing is written.
+    An unreadable file raises :class:`UnreadableKey` either way; the caller
+    decides how loudly to say so.
     """
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 
     if path.exists():
         return _load_existing(path)
+    if not create:
+        return None
 
     key = ec.generate_private_key(ec.SECP256R1())
     pem = key.private_bytes(
@@ -95,8 +108,30 @@ def load_or_create_key(path: Path):
         encryption_algorithm=serialization.NoEncryption(),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp creates the file 0600, so the key is never readable by others.
+    descriptor, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=".vapid-", suffix=".tmp")
     try:
-        # 0600 from the first byte, rather than written and then narrowed.
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(pem)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, str(path))
+        except FileExistsError:
+            return _load_existing(path)
+        except OSError:
+            return _create_exclusive(path, pem, key)
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+    return key
+
+
+def _create_exclusive(path: Path, pem: bytes, key):
+    """The same promise without a hard link: created only if absent, removed if unfinished."""
+    try:
         descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return _load_existing(path)
@@ -106,12 +141,8 @@ def load_or_create_key(path: Path):
             handle.flush()
             os.fsync(handle.fileno())
     except BaseException:
-        # A half-written file would be "unreadable" on every later load, and
-        # that is refused rather than replaced. Nothing has subscribed with a
-        # key that was never finished, so this one file may go.
         path.unlink(missing_ok=True)
         raise
-    os.chmod(path, 0o600)
     return key
 
 
@@ -122,8 +153,7 @@ def _load_existing(path: Path):
     try:
         return serialization.load_pem_private_key(path.read_bytes(), password=None)
     except Exception as exc:
-        logger.warning("hermie: VAPID key at %s is unreadable (%s); refusing to overwrite it", path, exc)
-        raise
+        raise UnreadableKey(f"{path} is not a usable key ({type(exc).__name__}); refusing to overwrite it") from exc
 
 
 def public_key_bytes(key) -> bytes:
@@ -218,6 +248,21 @@ def encrypt(payload: bytes, p256dh: str, auth: str, *, salt: Optional[bytes] = N
 # --- sending ----------------------------------------------------------------
 
 
+# How the push services word "this subscription was made with another key" in
+# a 403 body, lowercased. Apple names a reason (`VapidPkHashMismatch`); FCM
+# writes a sentence, in an older and a newer wording. Mozilla's autopush answers
+# a mismatched key with 401 rather than 403, so it is not read here.
+KEY_MISMATCH_MARKERS = (
+    "vapidpkhashmismatch",
+    "does not correspond to the sender id used to subscribe",
+    "do not correspond to the credentials used to create the subscription",
+)
+
+# How much of an error body is kept: enough to find a marker in, little enough
+# to put into a log line.
+ERROR_BYTES = 1000
+
+
 @dataclass(frozen=True)
 class Result:
     status: int
@@ -229,15 +274,23 @@ class Result:
         return self.status in (404, 410)
 
     @property
-    def key_mismatch(self) -> bool:
-        """403: the push service will not take this sender's key for this subscription.
-
-        The subscription was made with another VAPID key than the one this
-        gateway signs with (another sender's, or this gateway's before its key
-        file was replaced). Asking again changes nothing until the device
-        subscribes with this gateway's key, so the row is retired like a dead one.
-        """
+    def forbidden(self) -> bool:
+        """403: the push service refused this sender. Not by itself a key mismatch."""
         return self.status == 403
+
+    @property
+    def key_mismatch(self) -> bool:
+        """A 403 whose body says the subscription was made with another VAPID key.
+
+        Asking again changes nothing until the device subscribes with this
+        gateway's key, so the row is retired like a dead one. A 403 that does not
+        say so may be about something else entirely — Apple's `BadJwtToken` for
+        a `sub` it will not take reads the same status — and is not this.
+        """
+        if not self.forbidden:
+            return False
+        text = self.error.lower()
+        return any(marker in text for marker in KEY_MISMATCH_MARKERS)
 
     @property
     def ok(self) -> bool:
@@ -279,7 +332,7 @@ def send(
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
-            detail = exc.read().decode("utf-8", "replace")[:200]
+            detail = exc.read(ERROR_BYTES).decode("utf-8", "replace")
         except Exception:
             pass
         return Result(status=exc.code, error=detail)

@@ -838,19 +838,27 @@ cheaper than that mistake.
   against `cryptography`, which the Hermes runtime already ships. `pywebpush`
   would pull `py_vapid` and `http_ece` for roughly two hundred lines of
   arithmetic. The VAPID key is loaded, or minted on a first run, when the
-  plugin loads (exclusively: a gateway and a `validate` probe loading at once
-  end up with one key), written `0600`, and never rotated automatically; an
-  unreadable key file is refused, never replaced. Its public half is published
+  plugin loads, written `0600`, and never rotated automatically. Minting is
+  exclusive and whole: a `0600` temporary file, flushed, hard-linked into place
+  (`O_EXCL` where there are no hard links), so two loads at once end up with
+  one key and no reader meets a half-written file. A probe load (no
+  `ctx.state`: `validate`, `doctor`) reads the key and never mints one. An
+  unreadable key file is refused, never replaced, and said once per process. Its public half is published
   as the advert's `webPush.publicKey` beside `push.webpush.key`, and a browser
   subscribes with it (HERM-152: the key used to stay private, so every browser
   subscribed with another sender's key and every push from here was refused).
   A row may say which key it was made with (`applicationServerKey`, 80 to 100
   base64url characters, otherwise absent): a row naming no key is tried, a row
   naming another key is not sent to and is reported once (the same capped
-  report set the relay uses). 404 and 410 retire the subscription, and so does
-  a 403, the push service's answer to a key the subscription was not made with
-  (reason `webpush-key`); the push service's words go into the log line, since
-  a 403 for a `sub` it refuses reads the same from here. The encrypted body is
+  report set the relay uses). 404 and 410 retire the subscription. A 403
+  retires it (reason `webpush-key`) when it is about the key: the body says so
+  (Apple `VapidPkHashMismatch`, FCM's "do not correspond" sentences; Mozilla
+  answers a mismatch with 401, which is not read as one), or the row names no
+  key. A 403 for a row naming this gateway's key that does not say the key is
+  wrong cannot be a mismatch (Apple's `BadJwtToken` for a refused `sub` reads
+  the same status), so the row stays live and the refusal is reported once with
+  the push service's words: retiring it would be for good, since a client whose
+  key matches has no reason to rewrite its row. The encrypted body is
   `{title, body, data}`, which is what the app's service worker reads.
 - **Relay** — for the native app on iPhone, iPad and Mac, which Expo no longer
   reaches. Only an app's publisher can talk to Apple's push service for that
@@ -923,7 +931,7 @@ registration.** That entry lives under the app's `ui_meta` key and a write there
 would fight its compare-and-swap. A retired registration is skipped until the
 device writes a fresh entry whose `updatedAt` moves past the retirement. That
 covers every reason alike: Expo's `DeviceNotRegistered`, a Web Push 404 or 410,
-a Web Push 403 for the wrong key, the relay's `gone`. A browser that subscribes
+a Web Push 403 about the key, the relay's `gone`. A browser that subscribes
 again with the advert's key rewrites its row, and so lifts its own retirement.
 
 ### Threading

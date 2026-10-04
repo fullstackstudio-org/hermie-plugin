@@ -32,6 +32,14 @@ __version__ = contract.PLUGIN_VERSION
 IMPLEMENTED = ("push", "context", "memory", "web")
 
 
+def _has_state(ctx: Any) -> bool:
+    try:
+        ctx.state.get  # a facade that cannot be read is not a store
+        return True
+    except Exception:
+        return False
+
+
 class Runtime:
     """Everything a module may touch, and nothing else.
 
@@ -43,6 +51,11 @@ class Runtime:
     def __init__(self, ctx: Any, *, home: Optional[Path] = None, store: Any = None):
         self.ctx = ctx
         self.home = home or uimeta.hermes_home()
+        # A context with no state facade is one built for probing (`hermes
+        # plugins validate`, `doctor`): such a load may read what the serving
+        # gateway keeps, and must not create any of it — the VAPID key above
+        # all, which every browser subscribes with.
+        self.probe = not _has_state(ctx)
         self.state = State(store if store is not None else self._store()).load()
 
     def _store(self) -> Any:
