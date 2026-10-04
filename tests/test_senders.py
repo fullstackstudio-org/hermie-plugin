@@ -212,11 +212,94 @@ def test_the_public_key_is_the_uncompressed_point_in_base64url(tmp_path):
     assert webpush.unb64(text)[0] == 4
 
 
-def test_a_403_is_a_key_mismatch_and_nothing_else_is():
-    assert webpush.Result(status=403).key_mismatch is True
+# What the push services answer when a subscription was made with another key.
+APPLE_MISMATCH = '{"reason":"VapidPkHashMismatch"}'
+FCM_MISMATCH = (
+    "the key in the authorization header does not correspond to the sender ID used to subscribe this user"
+)
+FCM_MISMATCH_NEW = (
+    "the VAPID credentials in the authorization header do not correspond to the credentials used to "
+    "create the subscriptions."
+)
+
+
+def test_only_a_403_that_says_so_is_a_key_mismatch():
+    for body in (APPLE_MISMATCH, FCM_MISMATCH, FCM_MISMATCH_NEW):
+        assert webpush.Result(status=403, error=body).key_mismatch is True
+        assert webpush.Result(status=401, error=body).key_mismatch is False
+    # A 403 for a token the service will not take is not about the key.
+    assert webpush.Result(status=403, error='{"reason":"BadJwtToken"}').key_mismatch is False
+    assert webpush.Result(status=403).key_mismatch is False
+    assert webpush.Result(status=403).forbidden is True
     for status in (201, 400, 401, 404, 410, 413, 429, 500, 0):
         assert webpush.Result(status=status).key_mismatch is False
+        assert webpush.Result(status=status).forbidden is False
     assert webpush.Result(status=403).device_gone is False
+
+
+def test_minting_writes_the_whole_file_or_none_at_all(tmp_path, monkeypatch):
+    """A key file that exists is a finished one: a failed write leaves nothing to refuse later."""
+    import os
+
+    path = tmp_path / "vapid.pem"
+
+    def broken(_fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", broken)
+    with pytest.raises(OSError):
+        webpush.load_or_create_key(path)
+    assert sorted(item.name for item in tmp_path.iterdir()) == []
+
+    monkeypatch.undo()
+    key = webpush.load_or_create_key(path)
+    assert webpush.public_key_bytes(webpush.load_or_create_key(path)) == webpush.public_key_bytes(key)
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["vapid.pem"]
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_lost_race_reads_the_winners_key_and_leaves_no_temporary_file(tmp_path, monkeypatch):
+    import os
+
+    path = tmp_path / "vapid.pem"
+    winner = webpush.load_or_create_key(tmp_path / "winner.pem")
+    real_link = os.link
+
+    def link_after_the_winner(source, target, *args, **kwargs):
+        # The other process got there first, between our check and our link.
+        (tmp_path / "winner.pem").rename(path)
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", link_after_the_winner)
+    got = webpush.load_or_create_key(path)
+
+    assert webpush.public_key_bytes(got) == webpush.public_key_bytes(winner)
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["vapid.pem"]
+
+
+def test_without_hard_links_the_key_is_still_created_exclusively(tmp_path, monkeypatch):
+    import errno
+    import os
+
+    def no_links(*_args, **_kwargs):
+        raise OSError(errno.EPERM, "no hard links on this file system")
+
+    monkeypatch.setattr(os, "link", no_links)
+    path = tmp_path / "vapid.pem"
+    key = webpush.load_or_create_key(path)
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["vapid.pem"]
+    monkeypatch.undo()
+    assert webpush.public_key_bytes(webpush.load_or_create_key(path)) == webpush.public_key_bytes(key)
+
+
+def test_loading_without_minting_finds_nothing_and_creates_nothing(tmp_path):
+    path = tmp_path / "vapid.pem"
+    assert webpush.load_or_create_key(path, create=False) is None
+    assert not path.exists()
+    key = webpush.load_or_create_key(path)
+    assert webpush.public_key_bytes(webpush.load_or_create_key(path, create=False)) == webpush.public_key_bytes(key)
 
 
 # -- the key this gateway publishes, and the rows that name one --------------
@@ -262,13 +345,13 @@ def loaded_push(tmp_path, monkeypatch, rows=None, settings=None):
     return home, module
 
 
-def push_service(monkeypatch, status=201):
+def push_service(monkeypatch, status=201, error=""):
     """Every Web Push send answers *status*; returns the endpoints that were asked."""
     asked = []
 
     def send(key, endpoint, p256dh, auth, payload, contact=""):
         asked.append(endpoint)
-        return webpush.Result(status=status)
+        return webpush.Result(status=status, error=error)
 
     monkeypatch.setattr(push_pkg.webpush, "send", send)
     return asked
@@ -434,3 +517,81 @@ def test_a_403_retires_the_row_until_the_device_writes_it_again(tmp_path, monkey
     push_service(monkeypatch, status=201)
     rewrite_rows(home, {"w1": webpush_row(updatedAt=int(time.time()) + 60)})
     assert module.deliver(approval(3)) == 1
+
+
+def test_a_403_for_a_row_on_this_gateways_key_is_said_and_not_retired(tmp_path, monkeypatch, caplog):
+    """The key cannot be the problem, so the row must not go dark over it.
+
+    Apple, for one, answers 403 `BadJwtToken` for a `sub` it will not take. A
+    retired row only comes back when the device writes it again, and a client
+    whose key already matches has no reason to.
+    """
+    home, module = loaded_push(tmp_path, monkeypatch)
+    rewrite_rows(home, {"w1": webpush_row(applicationServerKey=module.web_push_public_key())})
+    asked = push_service(monkeypatch, status=403, error='{"reason":"BadJwtToken"}')
+
+    with caplog.at_level("WARNING"):
+        assert module.deliver(approval(1)) == 0
+        assert module.deliver(approval(2)) == 0
+
+    assert asked == ["https://push.example/w1", "https://push.example/w1"]
+    assert "w1" not in module.runtime.state.data["retired"]
+    said = [record.getMessage() for record in caplog.records if "w1" in record.getMessage()]
+    assert len(said) == 1
+    assert "BadJwtToken" in said[0]
+
+
+def test_a_403_that_says_the_key_is_wrong_retires_even_a_row_naming_this_key(tmp_path, monkeypatch):
+    home, module = loaded_push(tmp_path, monkeypatch)
+    rewrite_rows(home, {"w1": webpush_row(applicationServerKey=module.web_push_public_key())})
+    push_service(monkeypatch, status=403, error=APPLE_MISMATCH)
+
+    assert module.deliver(approval(1)) == 0
+    assert module.runtime.state.data["retired"]["w1"]["reason"] == "webpush-key"
+
+
+def test_a_probe_loads_the_key_but_never_mints_one(tmp_path, monkeypatch):
+    """`hermes plugins validate` and `doctor` register against a context with no state."""
+    home, ctx = gateway(tmp_path, app_meta=app_meta_with())
+    monkeypatch.setattr(uimeta, "hermes_home", lambda: home)
+    del ctx.state
+    key_file = home / "plugin-data" / "hermie" / "vapid.pem"
+
+    hermie_plugin.register(ctx)
+
+    advert = uimeta.read_key(uimeta.PLUGIN_KEY, home)
+    assert not key_file.exists()
+    assert "webPush" not in advert
+    assert contract.CAP_PUSH_WEBPUSH_KEY not in contract.read_capabilities(advert)
+
+    # A key the serving gateway already minted is read and published.
+    minted = webpush.load_or_create_key(key_file)
+    hermie_plugin.register(ctx)
+    advert = uimeta.read_key(uimeta.PLUGIN_KEY, home)
+    assert advert["webPush"] == {"publicKey": webpush.public_key_b64(minted)}
+
+
+def test_an_unreadable_key_is_said_once_not_once_per_row(tmp_path, monkeypatch, caplog):
+    home, ctx = gateway(
+        tmp_path,
+        app_meta=app_meta_with(
+            registrations={
+                "w1": webpush_row(),
+                "w2": webpush_row(endpoint="https://push.example/w2"),
+            }
+        ),
+    )
+    monkeypatch.setattr(uimeta, "hermes_home", lambda: home)
+    path = ctx.state.data_dir / "vapid.pem"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("this is not a PEM file")
+    asked = push_service(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        module = push_pkg.register(ctx, hermie_plugin.Runtime(ctx, home=home))
+        assert module.deliver(approval(1)) == 0
+        assert module.deliver(approval(2)) == 0
+
+    assert asked == []
+    assert len([record for record in caplog.records if "VAPID key" in record.getMessage()]) == 1
+    assert path.read_text() == "this is not a PEM file"

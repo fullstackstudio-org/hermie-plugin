@@ -219,19 +219,29 @@ webPush:
 The key is loaded, or minted on a first run, when the plugin loads, and it is
 published only when that worked: never when push is off, never where nothing can
 sign, and never when the key file cannot be read (that file is refused, not
-replaced). It is never rotated automatically; a new key is a gateway every
-browser has to subscribe to again.
+replaced, and said once in the log). A probe load (`hermes plugins validate`,
+`doctor`) reads an existing key but never mints one. Minting writes the whole
+file or nothing, and two processes minting at once end up with one key. It is
+never rotated automatically; a new key is a gateway every browser has to
+subscribe to again.
 
 A `webpush` row may say which key it was made with, as `applicationServerKey`
 (80 to 100 base64url characters; anything else reads as absent). A row that
 names no key is tried, as every row was before. A row that names another key is
 not sent to and is said once in the log, because its push service would refuse
-it anyway. A 403 from the push service retires the row in the plugin's own state
-(`webpush-key`), like a 404 or 410: it is not asked again until the device
-writes its row with a newer `updatedAt`, which a client does when it subscribes
-again with the advert's key. The log line carries the push service's own words,
-because a 403 for a `sub` it will not take (see `vapid_contact`) reads the same
-from here.
+it anyway.
+
+A 403 from the push service retires the row in the plugin's own state
+(`webpush-key`), like a 404 or 410, when it is about the key: the response says
+so (Apple's `VapidPkHashMismatch`, FCM's "do not correspond to the credentials
+used to create the subscription"), or the row names no key, which is every row
+written for another sender's key. A retired row is not asked again until the
+device writes it with a newer `updatedAt`, which a client does when it
+subscribes again with the advert's key. A 403 for a row that names **this**
+gateway's key, and does not say the key is wrong, cannot be a mismatch — Apple
+answers `BadJwtToken` the same way for a `sub` it will not take (see
+`vapid_contact`) — so that row stays live and the refusal is said once in the
+log, with the push service's own words.
 
 ## Requirements
 

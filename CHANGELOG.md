@@ -22,12 +22,16 @@ people.
 
 ### Changed
 
-- **A 403 from a push service retires the Web Push row** (reason `webpush-key`), like a 404 or 410,
-  until the device writes its row with a newer `updatedAt`. The push service's own words go into the
-  log line, since a 403 for a refused `sub` looks the same from here.
-- **Minting the VAPID key is exclusive.** A gateway and a `hermes plugins validate` probe loading at
-  the same moment end up with one key, created `0600` from the first byte; a write that fails leaves
-  no half-written file behind to be refused on the next load.
+- **A 403 about the key retires the Web Push row** (reason `webpush-key`), like a 404 or 410, until
+  the device writes its row with a newer `updatedAt`. "About the key" means the response says so
+  (Apple `VapidPkHashMismatch`, FCM's credentials sentence) or the row names no key. A 403 for a row
+  that names this gateway's key and does not say the key is wrong (Apple `BadJwtToken`, for one)
+  leaves the row live and is logged once, with the push service's words.
+- **Minting the VAPID key is exclusive and whole.** The PEM goes to a `0600` temporary file, is
+  flushed and hard-linked into place (`O_EXCL` where there are no hard links), so two processes
+  minting at once end up with one key and no load ever meets a half-written file. A probe load
+  (`hermes plugins validate`, `doctor`) reads the key but never mints one. An unreadable key file is
+  logged once per process, not once per device per notification.
 
 - **`scripts/guard_scan.py` no longer loads the scanner into its own process.** Each scanner now runs
   in a child interpreter that executes `scripts/guard_scan_runner.py` with the checkout on `PYTHONPATH`,

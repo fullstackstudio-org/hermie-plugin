@@ -133,8 +133,8 @@ CAP_PUSH_WEBPUSH = "push.webpush"
 # when the key could be loaded or minted at load: `push.webpush` alone says the
 # gateway can sign, this says which key it signs with. A `webpush` row may name
 # the key it was made with (`applicationServerKey`); a row naming another key
-# is not sent to, and a push service's 403 retires the row until the device
-# writes it again.
+# is not sent to, and a push service's 403 about the key retires the row until
+# the device writes it again.
 CAP_PUSH_WEBPUSH_KEY = "push.webpush.key"
 CAP_PUSH_PREVIEW = "push.preview"
 CAP_PUSH_MUTE = "push.mute"

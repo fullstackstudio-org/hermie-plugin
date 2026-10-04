@@ -515,10 +515,27 @@ class PushModule:
         return sent
 
     def vapid_key(self):
+        """The VAPID private key, or ``None`` where there is none to use.
+
+        Minted on a first run, except in a probe, which only reads one. A key
+        file that cannot be read is refused rather than replaced, and said once
+        per process — not once per device per notification.
+        """
         if self._vapid_key is None:
             configured = str(self.runtime.config("push.vapid_key_path", "") or "")
             path = Path(configured) if configured else (self.runtime.data_dir / "vapid.pem")
-            self._vapid_key = webpush.load_or_create_key(path)
+            create = not getattr(self.runtime, "probe", False)
+            try:
+                self._vapid_key = webpush.load_or_create_key(path, create=create)
+            except Exception as exc:
+                self._report_once(
+                    f"vapid:{path}",
+                    "hermie: VAPID key at %s cannot be used (%s); it is not replaced, and Web Push sends "
+                    "nothing until it is fixed or removed",
+                    path,
+                    exc,
+                )
+                return None
         return self._vapid_key
 
     def web_push_public_key(self) -> str:
@@ -534,10 +551,9 @@ class PushModule:
         if self._web_push_public_key is None:
             self._web_push_public_key = ""
             if webpush.available():
-                try:
-                    self._web_push_public_key = webpush.public_key_b64(self.vapid_key())
-                except Exception as exc:
-                    logger.warning("hermie: no VAPID key to publish (%s); Web Push keeps no key in the advert", exc)
+                key = self.vapid_key()
+                if key is not None:
+                    self._web_push_public_key = webpush.public_key_b64(key)
         return self._web_push_public_key
 
     @staticmethod
@@ -553,9 +569,8 @@ class PushModule:
     ) -> int:
         if not webpush.available():
             return 0
-        try:
-            key = self.vapid_key()
-        except Exception:
+        key = self.vapid_key()
+        if key is None:
             return 0
         # A subscription made with another sender's key is refused by its push
         # service; asking anyway costs a request per notification and says
@@ -586,20 +601,36 @@ class PushModule:
             logger.info("hermie: %s says %s is gone; retiring it", result.status, registration.installation_id)
             self.runtime.state.retire(registration.installation_id, f"http-{result.status}")
             return 0
-        if result.key_mismatch:
-            # Retired like a dead device, in this plugin's own state, and lifted
-            # the same way: the device writes its row again with a newer
-            # `updatedAt`. The push service's own words go along, cut short,
-            # because a 403 for a bad token (a `sub` it will not take) reads the
-            # same from here and an operator needs to tell the two apart.
+        if result.forbidden:
+            # The push service's own words go along, cut short: they are what
+            # tells a key mismatch from a token it will not take.
             detail = "".join(ch if ch.isprintable() else " " for ch in result.error)[:160]
-            logger.warning(
-                "hermie: the push service refused this gateway's VAPID key for %s (403 %r); "
-                "retiring it until the device subscribes again",
+            if result.key_mismatch or not registration.application_server_key:
+                # The subscription was made with another key: the service says
+                # so, or the row cannot say otherwise (every row written for
+                # Hermie Web's key). Retired like a dead device, in this
+                # plugin's own state, and lifted the same way: the device writes
+                # its row again with a newer `updatedAt`.
+                logger.warning(
+                    "hermie: the push service refused this gateway's VAPID key for %s (403 %r); "
+                    "retiring it until the device subscribes again",
+                    registration.installation_id,
+                    detail,
+                )
+                self.runtime.state.retire(registration.installation_id, "webpush-key")
+                return 0
+            # The row was made with THIS key, so the key is not the problem —
+            # Apple's `BadJwtToken` for a `sub` it will not take reads the same
+            # status. Retiring would take the row away for good, since a client
+            # whose key matches has no reason to write it again; it stays live,
+            # and is said once.
+            self._report_once(
+                f"webpush-403:{registration.installation_id}",
+                "hermie: the push service refused a push to %s (403 %r) although it was subscribed with "
+                "this gateway's key; not retiring it (check push.vapid_contact)",
                 registration.installation_id,
                 detail,
             )
-            self.runtime.state.retire(registration.installation_id, "webpush-key")
             return 0
         if not result.ok:
             logger.warning("hermie: web push returned %s for %s", result.status, registration.installation_id)
