@@ -5,7 +5,7 @@
 # `hermie-plugin`. Changing it renames both, so it does not change.
 name: hermie
 manifest_version: 1
-version: 0.10.0
+version: 0.11.0
 description: >-
   Hermie's gateway-side companion: push notifications for bot messages, approval
   and clarify requests (and, where the gateway reports them, secure inputs,

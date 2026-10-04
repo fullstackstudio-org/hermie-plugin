@@ -6,8 +6,15 @@ people.
 
 ## Unreleased
 
+## 0.11.0 — 2026-10-04
+
 ### Added
 
+- **The bundled web client is the M2 client.** `dashboard/app/` now carries web client 0.2.0 from app
+  commit `7013e53b9308` (35 files, 1,088,140 bytes): the chat list with folders and the archive, chats
+  with streaming, the composer, approvals, clarify and secret prompts, passkey confirmations,
+  Settings (account, this gateway, chats, chat list, appearance, about, passkeys, MCP) and gateways
+  without sign-in. Hermie Web is untouched.
 - **`push.request.confirm`: a `confirm` request raises a notification.** On a gateway that fires
   `pre_confirm_request` (the fork's), a `type: request` with `method: confirm`, `requestId`, `level`
   (`plain` or `passkey`) and the runtime `sessionId`. It is posted under **no category** at either
