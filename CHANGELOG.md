@@ -6,8 +6,16 @@ people.
 
 ## Unreleased
 
+## 0.12.0 — 2026-10-04
+
 ### Added
 
+- **The bundled web client asks forms, files and draft reviews.** `dashboard/app/` now carries web
+  client 0.2.0 from app commit `65528045ac68` (36 files, 1,191,042 bytes). On a gateway whose
+  `interactive` toolset is on, the client shows an agent's form (typed fields with validation), file
+  request (picked or photographed, metadata removed, uploaded straight into the request's folder with
+  its SHA-256) and draft review (approve, approve with changes, reject), each with Later and, for forms
+  and files, Don't share. Hermie Web is untouched.
 - **A form, a file request and a draft to review raise a notification.** On a gateway that fires
   `pre_server_request`, a `type: request` push for `input.form`, `input.file` and `review.draft`
   carries the method, the `requestId` and the conversation, and nothing else: the lock screen says
