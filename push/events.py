@@ -82,12 +82,17 @@ PAYLOAD_TYPES = TYPES + UNFILTERED_TYPES
 
 # The server requests a notification can be raised for, by the name the gateway
 # gives the request. `approval` and `clarify` were the first two; the secure
-# inputs and `confirm` came with the native app.
+# inputs and `confirm` came with the native app, the interactive requests (a form
+# to fill in, files to hand over, a draft to review) after them.
 METHOD_APPROVAL = "approval"
 METHOD_CLARIFY = "clarify"
 METHOD_CONFIRM = "confirm"
 SECURE_INPUT_METHODS = ("secret", "sudo", "vault.unlock_prompt", "vault.code", "vault.save_login")
-REQUEST_METHODS = (METHOD_APPROVAL, METHOD_CLARIFY, *SECURE_INPUT_METHODS, METHOD_CONFIRM)
+# Answered in the app, never from a notification, and never described by one: the
+# form's fields, the file kinds asked for and the draft's text are the agent's
+# words and stay behind the tap, exactly like a secure input's name.
+INTERACTIVE_METHODS = ("input.form", "input.file", "review.draft")
+REQUEST_METHODS = (METHOD_APPROVAL, METHOD_CLARIFY, *SECURE_INPUT_METHODS, METHOD_CONFIRM, *INTERACTIVE_METHODS)
 
 # What a lock screen says about a request that takes something from the person.
 # The KIND of thing wanted and never which one: a variable name, a site or a
@@ -98,6 +103,14 @@ SECURE_INPUT_BODY = {
     "vault.unlock_prompt": "Needs your master password",
     "vault.save_login": "Wants to save a login",
     "vault.code": "Needs a verification code",
+}
+
+# What a lock screen says about an interactive request: the KIND of thing wanted,
+# never what is in it. The same rule as for a secure input.
+INTERACTIVE_BODY = {
+    "input.form": "Has a form for you",
+    "input.file": "Needs a file",
+    "review.draft": "Has a draft to review",
 }
 
 # `confirm` asks at one of two levels. A level this build has never heard of is
@@ -227,7 +240,7 @@ class Notification:
         return (
             self.type == "request"
             and not self.clear
-            and self.extra.get("method") in (METHOD_CONFIRM, *SECURE_INPUT_METHODS)
+            and self.extra.get("method") in (METHOD_CONFIRM, *SECURE_INPUT_METHODS, *INTERACTIVE_METHODS)
         )
 
     @property
@@ -413,23 +426,34 @@ def from_server_request(
 ) -> Optional[Notification]:
     """A server request the gateway wrote to the person's apps (`pre_server_request`).
 
-    Only the kinds this module has a sentence for: the secure inputs, and a
-    clarify question that now has its id. Anything else — an approval and a
+    Only the kinds this module has a sentence for: the secure inputs, the
+    interactive requests (a form, files, a draft) and a clarify question that
+    now has its id. Anything else — an approval and a
     confirmation have hooks of their own, a window read is nobody's business —
     answers ``None``, which is also the answer for a request that names no id,
     because a push for something the app cannot look up is a bell with nothing
     behind it.
 
     **No text, ever.** The request's own parameters (an environment variable's
-    name, a site, a hint, a command) never reach this function and are not asked
-    for: what would be said about a password prompt is the one thing a lock
-    screen must not.
+    name, a site, a hint, a command, a form's fields, a draft) never reach this
+    function and are not asked for: what would be said about a password prompt is
+    the one thing a lock screen must not.
+
+    The interactive requests are raised however many apps the gateway reached,
+    **including none**: a request parked for want of a capable device is exactly
+    the one a notification can bring the phone back for. This function never
+    reads `reached`, so nothing here can hold such a push back.
     """
     method = str(method or "")
     rid = str(request_id or "")
-    if not rid or method not in (*SECURE_INPUT_METHODS, METHOD_CLARIFY):
+    if not rid or method not in (*SECURE_INPUT_METHODS, *INTERACTIVE_METHODS, METHOD_CLARIFY):
         return None
-    body = "Asked you a question" if method == METHOD_CLARIFY else SECURE_INPUT_BODY[method]
+    if method == METHOD_CLARIFY:
+        body = "Asked you a question"
+    elif method in INTERACTIVE_METHODS:
+        body = INTERACTIVE_BODY[method]
+    else:
+        body = SECURE_INPUT_BODY[method]
     return Notification(
         type="request",
         bot=bot,
@@ -713,14 +737,15 @@ def clear_server_request(
 ) -> Optional[Notification]:
     """A server request the gateway reported is over (`post_server_request`).
 
-    For the kinds `from_server_request` and `from_confirm` raise. The gateway's
+    For the kinds `from_server_request` and `from_confirm` raise (a form, files
+    and a draft among them). The gateway's
     word for how it ended is mapped onto the three a device is told: it was
     answered (by anyone), it timed out, or it was cancelled — which is every
     other way a request ends, including the gateway having no client left to ask.
     """
     method = str(method or "")
     rid = str(request_id or "")
-    if not rid or method not in (*SECURE_INPUT_METHODS, METHOD_CLARIFY, METHOD_CONFIRM):
+    if not rid or method not in (*SECURE_INPUT_METHODS, *INTERACTIVE_METHODS, METHOD_CLARIFY, METHOD_CONFIRM):
         return None
     why = str(reason or "")
     if why in ("answered", "resolved"):

@@ -713,7 +713,11 @@ class PushModule:
         )
 
     def on_pre_server_request(self, **kwargs: Any) -> None:
-        """A secure input, or a clarify question with its id, was written to the apps."""
+        """A secure input, an interactive request or a clarify question with its id was written to the apps.
+
+        `reached` is not read: a request parked because no capable device is
+        attached (`reached: 0`) is exactly what a push can bring the phone back for.
+        """
         self._server_requests_heard = True
         self.offer(
             events.from_server_request(
