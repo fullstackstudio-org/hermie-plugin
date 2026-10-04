@@ -6,8 +6,17 @@ people.
 
 ## Unreleased
 
+## 0.13.0 — 2026-10-04
+
 ### Added
 
+- **The bundled web client is 0.3.0.** `dashboard/app/` now carries web client 0.3.0 from app commit
+  `7efbd211b495` (66 files, 1,458,326 bytes). Since 0.2.0 the client gained: YOLO and per-chat
+  options; a message menu to edit, branch and copy links; a menu on each chat-list row and a bot
+  profile page; Crons and Activity pages; Web Push; passkey self-enrolment; review of file changes
+  hunk by hunk and the key facts of a passkey confirmation; images shown inline and through the new
+  image route; a fix for dragging and dropping; and a cap on repeated send failures in the composer,
+  with a "Start a new chat" button. Hermie Web is untouched.
 - **`push.webpush.key`: this gateway's VAPID public key is in the advert.** `webPush: {publicKey}`,
   base64url of the uncompressed P-256 point (87 characters), is the `applicationServerKey` a browser
   subscribes with (HERM-152: the key used to stay private, so browsers subscribed with another
