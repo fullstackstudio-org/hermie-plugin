@@ -52,9 +52,10 @@ def confirm(level):
     )
 
 
-def passkey(change):
+def passkey(change, via=None):
     return events.from_passkey_change(
-        bot="scout", change=change, user_id=USER, credential={"id": "Y3JlZA", "name": "Pocket", "rp_id": "x.test"}, at=AT
+        bot="scout", change=change, user_id=USER, credential={"id": "Y3JlZA", "name": "Pocket", "rp_id": "x.test"},
+        at=AT, via=via,
     )
 
 
@@ -123,6 +124,8 @@ BUILDERS = {
     "security_added": (lambda: passkey("added"), False),
     "security_added_preview": (lambda: passkey("added"), True),
     "security_revoked": (lambda: passkey("revoked"), False),
+    "security_added_self": (lambda: passkey("added", via="self"), False),
+    "security_added_self_preview": (lambda: passkey("added", via="self"), True),
 }
 
 
@@ -396,6 +399,39 @@ def test_the_credentials_name_appears_only_as_preview_text():
     assert title == "scout" and "Pocket" in body and body.endswith("was added")
     assert note.payload(preview=True)["preview"] == body
     assert "Pocket" not in json.dumps(note.payload(preview=False))
+
+
+def test_a_passkey_enrolled_with_a_new_sign_in_says_so():
+    for via, body in (
+        ("self", "A passkey was added after a new sign-in"),
+        (None, "A passkey was added"),
+        ("", "A passkey was added"),
+        ("operator", "A passkey was added"),
+        ("passkey", "A passkey was added"),
+        ("something-new", "A passkey was added"),
+    ):
+        note = passkey("added", via=via)
+        assert note.rendered(preview=False) == ("scout", body), via
+        assert note.type == "security" and note.user_strict and note.user_id == USER
+
+
+def test_the_self_enrolment_wording_carries_no_more_than_the_words():
+    note = passkey("added", via="self")
+    data = note.payload(preview=False, gateway_key=KEY)
+    # The data bag is the plain one: `via` is not a field, only the words differ.
+    assert data == passkey("added").payload(preview=False, gateway_key=KEY)
+    assert set(data) == {"v", "type", "bot", "at", "eventId", "gatewayKey", "change"}
+    preview = note.payload(preview=True, gateway_key=KEY)
+    assert preview["preview"] == "The passkey \u201cPocket\u201d was added after a new sign-in"
+    assert note.rendered(preview=True)[1] == preview["preview"]
+    for text in (json.dumps(data), json.dumps(preview), note.body):
+        for leak in ("Y3JlZA", "x.test", "self", "web", "native", "client"):
+            assert leak not in text.replace("sign-in", ""), leak
+
+
+def test_a_removed_passkey_keeps_its_wording_whatever_the_via():
+    assert passkey("revoked", via="self").rendered(preview=False) == ("scout", "A passkey was removed")
+    assert passkey("revoked", via="self").text == "The passkey \u201cPocket\u201d was removed"
 
 
 def test_a_passkey_change_for_nobody_is_not_sent():
@@ -844,6 +880,17 @@ def test_on_passkey_change_raises_a_security_push(tmp_path, monkeypatch):
     [note] = built
     assert (note.type, note.extra["change"], note.body, note.at) == ("security", "revoked", "A passkey was removed", AT)
     assert "operator" not in json.dumps(note.payload(preview=True))
+
+
+def test_on_passkey_change_passes_the_self_enrolment_through(tmp_path, monkeypatch):
+    ctx, _, built = all_hooks(tmp_path, monkeypatch)
+    hook = ctx.hooks["on_passkey_change"][0]
+    credential = {"id": "i", "name": "Pocket", "rp_id": "x"}
+    hook(change="added", user_id=USER, credential=credential, at=AT, via="self")
+    hook(change="added", user_id=USER, credential=credential, at=AT + 1)  # a gateway whose hook has no `via`
+    assert [n.body for n in built] == ["A passkey was added after a new sign-in", "A passkey was added"]
+    assert all(n.type == "security" and n.user_strict for n in built)
+    assert "self" not in json.dumps(built[0].payload(preview=True)).replace("sign-in", "")
 
 
 def test_a_hook_that_names_nobody_or_nothing_raises_nothing(tmp_path, monkeypatch):

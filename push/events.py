@@ -553,8 +553,15 @@ def from_background_complete(
     )
 
 
+# The one thing about how a passkey was added that the lock screen may say: the
+# person added it themselves after signing in again (`via == "self"`), not with
+# a code someone minted. Any other `via`, or none, is the plain wording.
+SELF_ENROLMENT = "self"
+AFTER_SIGN_IN = " after a new sign-in"
+
+
 def from_passkey_change(
-    *, bot: str, change: Any, user_id: Any, credential: Any, at: int
+    *, bot: str, change: Any, user_id: Any, credential: Any, at: int, via: Any = None
 ) -> Optional[Notification]:
     """A passkey was added to, or revoked from, a person's account (`on_passkey_change`).
 
@@ -565,7 +572,12 @@ def from_passkey_change(
     The lock screen says THAT, never which: the credential's name is a label the
     person chose and appears only as the preview text, on a device that asked for
     previews and a gateway that allows them. What does not travel at all is the
-    credential id, the relying party, and how the change was authorised.
+    credential id, the relying party and the kind of client. How the change was
+    authorised travels in one case only: a passkey the person enrolled with a
+    fresh sign-in (`via == "self"`) says so in its words, because that is the
+    path a stolen session would use, and a notice that says "after a new
+    sign-in" is the one the real owner recognises or does not. `via` is never
+    carried on its own, and a hook that passes none gets the plain wording.
     """
     what = str(change or "")
     uid = str(user_id or "")
@@ -575,6 +587,8 @@ def from_passkey_change(
         return None
     record = credential if isinstance(credential, dict) else {}
     word = "added" if what == "added" else "removed"
+    if what == "added" and via == SELF_ENROLMENT:
+        word += AFTER_SIGN_IN
     name = _clean(record.get("name"), 80)
     return Notification(
         type=SECURITY,
