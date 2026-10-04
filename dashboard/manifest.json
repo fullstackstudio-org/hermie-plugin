@@ -3,7 +3,7 @@
   "label": "Hermie",
   "description": "Backend routes for Hermie's memory browser and turn claims, and the static files of Hermie's web client under app/. No dashboard tab of its own.",
   "icon": "Bell",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "tab": { "hidden": true },
   "slots": [],
   "entry": "dist/index.js",
