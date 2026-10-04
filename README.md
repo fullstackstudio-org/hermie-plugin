@@ -82,9 +82,11 @@ the method decides what it may say and offer:
 - **A passkey added or removed** is `type: security`. It reaches every device of
   that person whatever they muted, whichever types they switched off and
   whichever chat is open, and is never held back by `push.types`. The lock screen
-  says "A passkey was added" or "A passkey was removed"; the credential's name
-  appears only as preview text, on a device that asked for previews and a gateway
-  that allows them.
+  says "A passkey was added" or "A passkey was removed"; a passkey the person
+  enrolled themselves after signing in again (the gateway's `via` is `self`) says
+  "A passkey was added after a new sign-in". The credential's name appears only
+  as preview text, on a device that asked for previews and a gateway that allows
+  them.
 - **A clearing push** follows an answer, a cancellation or a timeout. It carries
   no text and no category, and goes only to a registration row that says
   `clears: true`: a build that does not know the field would show it as a new

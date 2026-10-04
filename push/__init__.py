@@ -801,6 +801,7 @@ class PushModule:
                 user_id=kwargs.get("user_id"),
                 credential=kwargs.get("credential"),
                 at=int(kwargs.get("at") or time.time()),
+                via=kwargs.get("via"),
             )
         )
 

@@ -739,8 +739,12 @@ never crosses it.
 
 The lock screen says "A passkey was added" or "A passkey was removed". The
 credential's name appears only as the preview text, on a device that asked for
-previews through a transport that may carry them. The credential id, the
-relying party and how the change was authorised never travel at all. An event
+previews through a transport that may carry them. A passkey the person added
+themselves after signing in again (the hook's `via` is `self`) says "A passkey
+was added after a new sign-in", in the body and in the preview text; any other
+`via`, or none, keeps the plain wording, and `via` is never a field of the data
+bag. The credential id, the relying party and the kind of client never travel at
+all. An event
 that names no person is dropped: a security notice for nobody would be one for
 everybody.
 

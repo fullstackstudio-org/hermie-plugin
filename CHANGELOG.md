@@ -22,6 +22,12 @@ people.
 
 ### Changed
 
+- The security push for a passkey that the person added themselves after a new
+  sign-in (`on_passkey_change` with `via="self"`) says "A passkey was added after
+  a new sign-in". Every other addition, and a hook that passes no `via`, keeps
+  "A passkey was added"; a removal is unchanged. The push stays unmutable and
+  carries no credential id, relying party or client kind.
+
 - **A 403 about the key retires the Web Push row** (reason `webpush-key`), like a 404 or 410, until
   the device writes its row with a newer `updatedAt`. "About the key" means the response says so
   (Apple `VapidPkHashMismatch`, FCM's credentials sentence) or the row names no key. A 403 for a row
