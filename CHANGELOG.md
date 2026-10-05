@@ -6,6 +6,15 @@ people.
 
 ## Unreleased
 
+## 0.14.1 — 2026-10-05
+
+### Fixed
+
+- **The bundled web client is 0.4.1.** `dashboard/app/` now carries web client 0.4.1 from app commit
+  `fd22f04ed134` (67 files, 1,733,494 bytes). It fixes a reply's rows landing in the wrong chat: a
+  read of the newest rows that was still on its way when the reader switched to another chat (their
+  own chat, say) was applied to the chat they switched to. Hermie Web is untouched.
+
 ## 0.14.0 — 2026-10-05
 
 ### Added
