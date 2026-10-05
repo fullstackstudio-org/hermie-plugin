@@ -77,7 +77,7 @@ import time
 from typing import Any, Dict, Iterable, List
 
 # The plugin's own release version. Also in plugin.yaml; a test keeps them equal.
-PLUGIN_VERSION = "0.14.0"
+PLUGIN_VERSION = "0.14.1"
 
 # Where an update comes from, named here so the advert and the update check
 # cannot disagree about which repository this plugin is.
