@@ -6,6 +6,19 @@ people.
 
 ## Unreleased
 
+## 0.14.0 — 2026-10-05
+
+### Added
+
+- **The bundled web client is 0.4.0.** `dashboard/app/` now carries web client 0.4.0 from app commit
+  `f57cd4b9cf8a` (67 files, 1,733,252 bytes). Since 0.3.0 the client gained: files a bot shares
+  (pictures inline with the viewer, video and sound as seekable players, a PDF or any other file as a
+  download; fetched bytes are typed by kind and capped while they stream); the device requests a bot
+  can make (location, contact, a code to scan, a signature and a voice note), each asking the browser
+  only after a press on the sheet and declined on arrival where the browser cannot do it; and focus
+  that lands on the safe answer of an expensive-model or YOLO question at once. Hermie Web is
+  untouched.
+
 ## 0.13.0 — 2026-10-04
 
 ### Added
