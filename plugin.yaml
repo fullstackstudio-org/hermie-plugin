@@ -22,6 +22,16 @@ author: FullStack Studio
 license: MIT
 homepage: https://github.com/fullstackstudio-org/hermie-plugin
 kind: standalone
+
+# Every Hermie bot is a Hermes profile, and a gateway runs each bot's turn in
+# that profile's own home, where this plugin is not installed. `scope: gateway`
+# asks a gateway that supports it (the fork) to fire this plugin's hooks for
+# those turns too: install and enable it in the gateway's own home only, never
+# per profile. Only the hooks cross over (the `/me` command and the dashboard
+# routes stay where they are), and `ctx.profile_name` names the bot whose turn
+# it is. A gateway without the key ignores it, and then hears its own home's
+# turns only.
+scope: gateway
 tags:
   - notifications
   - push
@@ -44,9 +54,10 @@ python_dependencies: []
 # `provides_hooks`: `pre_confirm_request` and `on_passkey_change` (the fork's: a
 # `confirm` request opened, a passkey added or revoked), and
 # `pre_server_request`, `post_server_request` and `on_background_complete`
-# (named for the fork to implement; no gateway fires them yet). None is
-# listened to where it is unknown, and the push types they feed stay quiet. A
-# gateway without `optional_hooks` support ignores the key.
+# (the fork's: a request the gateway asks of a person opened or ended, a
+# /background task done). None is listened to where it is unknown, and the
+# push types they feed stay quiet. A gateway without `optional_hooks` support
+# ignores the key.
 hooks: &hooks
   - post_llm_call
   - on_session_end
