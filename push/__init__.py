@@ -327,9 +327,10 @@ class PushModule:
     def section(self) -> Section:
         return read_sections(self.runtime.app_sections())
 
-    def display_name(self) -> str:
+    def display_name(self, bot: str = "") -> str:
+        """The label of the bot a notification is about, read from that bot's own home."""
         try:
-            return self.runtime.bot_display_name()
+            return self.runtime.bot_display_name(bot or None)
         except Exception:
             return ""
 
@@ -344,7 +345,15 @@ class PushModule:
         if not notification.kind_session:
             return ""
         try:
-            return sessions.kind_for(notification.kind_session)
+            # The session lives in the bot's own home, which is the gateway's
+            # only for the gateway's own profile: a routed bot's sessions are in
+            # its profile's state.db, and asking the gateway's would find nothing.
+            home = self.runtime.profile_home_for(notification.bot)
+            if home is None:
+                return ""
+            if home == self.runtime.home:
+                return sessions.kind_for(notification.kind_session)
+            return sessions.kind_for(notification.kind_session, home=home)
         except Exception:
             return ""
 
@@ -376,7 +385,7 @@ class PushModule:
         # The lock screen shows the bot under the name a person gave it, where
         # there is one; `data.bot` stays the profile name, which is what the
         # app resolves a tap against. Read once per notification.
-        display_name = self.display_name()
+        display_name = self.display_name(notification.bot)
 
         expo_batch: List[Dict[str, Any]] = []
         expo_owners: List[str] = []

@@ -51,6 +51,11 @@ class Runtime:
     def __init__(self, ctx: Any, *, home: Optional[Path] = None, store: Any = None):
         self.ctx = ctx
         self.home = home or uimeta.hermes_home()
+        # The profile this gateway itself is, read once at load, when Hermes runs
+        # `register()` in the gateway's own home. A hook for a bot routed to
+        # another profile names that profile instead (`scope: gateway` in
+        # plugin.yaml), and `profile_home_for` is how the two are told apart.
+        self.own_profile = self.bot_name()
         # A context with no state facade is one built for probing (`hermes
         # plugins validate`, `doctor`): such a load may read what the serving
         # gateway keeps, and must not create any of it — the VAPID key above
@@ -99,11 +104,37 @@ class Runtime:
         except Exception:
             return "default"
 
-    def bot_display_name(self) -> str:
-        """The name this bot is shown under, or ``""`` when it has none.
+    def profile_home_for(self, bot: Optional[str] = None) -> Optional[Path]:
+        """The home of the profile `bot` names, or ``None`` when it cannot be found.
 
-        `display_name` in the profile's own `profile.yaml` — the label a person
-        gave the bot, which `profiles.display_name` also writes. Only a label
+        Every bot is a profile, and this plugin is enabled in the gateway's own
+        home only (`scope: gateway`): its hooks fire for every bot's turns, but
+        it was loaded once, here. What belongs to the gateway — the app's device
+        rows in `ui_meta`, the advert, the state file, the VAPID key — stays in
+        `self.home`. What belongs to one bot, its display name and its sessions,
+        lives in that bot's own home, which is this one only for the gateway's
+        own profile. Any other name is resolved through Hermes' own profile list
+        (`profile_name.profile_home`), so a name that is not one of this
+        gateway's profiles answers ``None`` rather than a guess.
+        """
+        name = str(bot or "").strip() or self.bot_name()
+        if name == self.own_profile:
+            return self.home
+        try:
+            from .profile_name import profile_home
+
+            return profile_home(name)
+        except Exception:
+            return None
+
+    def bot_display_name(self, bot: Optional[str] = None) -> str:
+        """The name `bot` (this turn's bot when omitted) is shown under, or ``""``.
+
+        `display_name` in that profile's own `profile.yaml` — the label a person
+        gave the bot, which `profiles.display_name` also writes. It is read from
+        the bot's own home (`profile_home_for`), never from the gateway's, which
+        holds the gateway's own bot's label; a bot whose home cannot be found
+        has no label here, and the caller shows its profile name. Only a label
         that route would accept is returned, checked by the very function it
         uses (`profile_name.clean_display_name`): a string, trimmed, at most 60
         characters, with no control, invisible formatting (bidi overrides,
@@ -114,7 +145,10 @@ class Runtime:
         """
         from .profile_name import DisplayNameRefused, clean_display_name
 
-        value = uimeta.read_display_name(self.home)
+        home = self.profile_home_for(bot)
+        if home is None:
+            return ""
+        value = uimeta.read_display_name(home)
         if not isinstance(value, str):
             return ""
         try:

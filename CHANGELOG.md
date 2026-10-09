@@ -6,6 +6,18 @@ people.
 
 ## Unreleased
 
+### Fixed
+
+- **Pushes for every bot, not only the gateway's own.** Every bot is a Hermes profile and a gateway
+  runs each bot's turn in that profile's home, where this plugin was never installed, so its hooks
+  never heard a bot's turn and no push went out after a bot replied. `plugin.yaml` now declares
+  `scope: gateway`: a gateway that supports the key (the fork) fires this plugin's hooks for every
+  profile's turns while it stays installed and enabled in the gateway's own home only. Device rows,
+  the advert, the state file and the VAPID key stay in the gateway's home. A bot's display name on
+  the lock screen and the `sessionKind` of its sessions are read from that bot's own home; a bot
+  whose home cannot be found is shown by its profile name rather than under another bot's label.
+  A gateway without the key behaves as before.
+
 ## 0.14.1 — 2026-10-05
 
 ### Fixed

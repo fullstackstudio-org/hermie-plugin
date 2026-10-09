@@ -47,6 +47,7 @@ cache held. A row read is cheaper than that mistake.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -81,8 +82,11 @@ def kind_of(title: Optional[str]) -> str:
     return KIND_OTHER
 
 
-def _session_db():
+def _session_db(home: Optional[Path] = None):
     """Hermes' shared session database, or a raised import error outside one.
+
+    `home` names the profile whose `state.db` is meant; ``None`` is the active
+    home's, which on the push worker is the gateway's own.
 
     `acquire`/`release` and nothing else. The older `get_shared_session_db`
     pair still resolves today, but it is in Hermes' own compat manifest with a
@@ -92,10 +96,10 @@ def _session_db():
     """
     from hermes_state_registry import acquire, release  # type: ignore
 
-    return acquire(), release
+    return (acquire(Path(home) / "state.db") if home is not None else acquire()), release
 
 
-def read_title(session_id: str) -> Optional[str]:
+def read_title(session_id: str, home: Optional[Path] = None) -> Optional[str]:
     """The title Hermes holds for this session, or ``None``.
 
     ``None`` covers every way of not knowing — no Hermes, no database, an id the
@@ -105,7 +109,7 @@ def read_title(session_id: str) -> Optional[str]:
     if not session_id:
         return None
     try:
-        database, close = _session_db()
+        database, close = _session_db(home)
     except Exception:
         return None
     try:
@@ -146,15 +150,17 @@ def available() -> bool:
         return False
 
 
-def kind_for(session_id: str, *, read: Any = None) -> str:
+def kind_for(session_id: str, *, read: Any = None, home: Optional[Path] = None) -> str:
     """The kind of one session, or ``""`` when this gateway cannot say.
 
     `read` is the title lookup, passed in so the classification can be driven
     without a gateway — the same shape `cron.detect` uses for its session
-    variable.
+    variable. `home` is the profile the session belongs to when that is not the
+    active one (a bot routed to another profile); the lookup is then asked with
+    it.
     """
     reader = read if read is not None else read_title
     try:
-        return kind_of(reader(session_id))
+        return kind_of(reader(session_id) if home is None else reader(session_id, home=home))
     except Exception:
         return ""
